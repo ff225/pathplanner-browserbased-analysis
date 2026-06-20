@@ -23,8 +23,15 @@
     --color-primary-strong: #0b5f59;
     --color-primary-soft: #d9f4ef;
     --color-primary-soft-text: #dffbf7;
-    --color-navigation: #2563eb;
-    --color-navigation-strong: #1d4ed8;
+
+    /* Legacy blue (revert here if needed):
+       --color-navigation: #2563eb;
+       --color-navigation-strong: #1d4ed8;
+       --route-primary: #2563eb;
+       --route-primary-strong: #1d4ed8;
+    */
+    --color-navigation: #1e40af;
+    --color-navigation-strong: #1e3a8a;
     --color-clinical: #14b8a6;
     --color-danger: #dc2626;
     --color-danger-strong: #b91c1c;
@@ -33,8 +40,8 @@
     --color-success-soft: #dcfce7;
     --color-warning: #b7791f;
 
-    --route-primary: #2563eb;
-    --route-primary-strong: #1d4ed8;
+    --route-primary: #1e40af;
+    --route-primary-strong: #1e3a8a;
 
     --shadow-sm: 0 10px 28px rgba(15, 31, 51, 0.12);
     --shadow-md: 0 18px 44px rgba(15, 31, 51, 0.18);

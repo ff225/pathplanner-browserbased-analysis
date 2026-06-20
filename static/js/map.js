@@ -78,4 +78,59 @@ document.addEventListener("DOMContentLoaded", function() {
             });
         });
     }
+
+    // Unified right sidebar (environmental data + turn-by-turn directions)
+    var rightSidebar = document.getElementById('rightSidebar');
+    var rightSidebarToggle = document.getElementById('rightSidebarToggle');
+    var envInspectorClose = document.getElementById('envInspectorClose');
+    var directionsClose = document.getElementById('directionsClose');
+
+    function setRightSidebarOpen(open) {
+        if (!rightSidebar) return;
+        document.body.classList.toggle('right-sidebar-open', open);
+        rightSidebar.setAttribute('aria-hidden', String(!open));
+        if (rightSidebarToggle) {
+            rightSidebarToggle.setAttribute('aria-expanded', String(open));
+            rightSidebarToggle.setAttribute('aria-label', open ? 'Close environmental data and directions' : 'Open environmental data and directions');
+            rightSidebarToggle.setAttribute('title', open ? 'Close environmental data and directions' : 'Environmental data & directions');
+        }
+        if (!open && rightSidebarToggle) {
+            rightSidebarToggle.focus({ preventScroll: true });
+        }
+        scheduleMapInvalidation();
+    }
+
+    if (rightSidebarToggle) {
+        rightSidebarToggle.addEventListener('click', function() {
+            setRightSidebarOpen(!document.body.classList.contains('right-sidebar-open'));
+        });
+    }
+
+    if (envInspectorClose) {
+        envInspectorClose.addEventListener('click', function() {
+            setRightSidebarOpen(false);
+        });
+    }
+
+    if (directionsClose) {
+        directionsClose.addEventListener('click', function() {
+            setRightSidebarOpen(false);
+        });
+    }
+
+    if (rightSidebar && mapPanel) {
+        [rightSidebar, mapPanel].forEach(function(element) {
+            element.addEventListener('transitionend', function(event) {
+                if (event.target === element) {
+                    invalidateMapSize();
+                }
+            });
+        });
+    }
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && document.body.classList.contains('right-sidebar-open')) {
+            setRightSidebarOpen(false);
+        }
+    });
 });

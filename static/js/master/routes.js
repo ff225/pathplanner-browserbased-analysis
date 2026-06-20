@@ -9,9 +9,9 @@ import * as RoutePlanner from '../services/routePlanner.js';
 
 const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
 const ROUTE_COORDINATE_PRECISION = 5;
-const ROUTE_PREVIEW_DURATION_MS = 6500;
+const ROUTE_PREVIEW_DURATION_MS = 15000;
 const ROUTE_PREVIEW_FOLLOW_ZOOM = 17;
-const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 140;
+const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 80;
 const routePreviewState = {
     marker: null,
     animationFrame: null,
@@ -21,6 +21,10 @@ const routePreviewState = {
     followZoom: null,
     lastCameraUpdateAt: 0
 };
+
+function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
 const MAPBOX_DIRECTIONS_LANGUAGE = 'it';
 const MAPBOX_DIRECTIONS_ROUTING_OPTIONS = Object.freeze({
     alternatives: true,
@@ -356,6 +360,81 @@ function updateRouteDirectionsPanel(route, directionsPanel) {
     }
 
     renderRouteDirections(route, directionsPanel);
+}
+
+function renderDirectionsSidebar(route) {
+    const panel = document.getElementById('directionsPanel');
+    const list = document.getElementById('directionsList');
+    const summary = document.getElementById('directionsSummary');
+    const empty = document.getElementById('directionsEmpty');
+    if (!panel || !list) {
+        return;
+    }
+
+    const routeName = route?.routeName || route?.name || 'Selected route';
+    const distance = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const duration = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
+
+    if (summary) {
+        summary.innerHTML = '';
+        const badges = [];
+        if (distance) badges.push(`Distance: ${distance}`);
+        if (duration) badges.push(`Duration: ${duration}`);
+        badges.forEach(text => {
+            const span = document.createElement('span');
+            span.textContent = text;
+            summary.appendChild(span);
+        });
+    }
+
+    list.innerHTML = '';
+    const steps = getRouteDirectionSteps(route);
+    if (!steps.length) {
+        if (empty) empty.hidden = false;
+        return;
+    }
+    if (empty) empty.hidden = true;
+
+    steps.forEach((instruction, index) => {
+        const li = document.createElement('li');
+        li.className = 'directions-step';
+        li.innerHTML = `
+            <span class="directions-step-icon" aria-hidden="true">${getManeuverIconSvg(instruction)}</span>
+            <span class="directions-step-body">
+                <span class="directions-step-type">${index + 1}. ${getManeuverLabel(instruction)}</span>
+                <span class="directions-step-text">${getInstructionText(instruction)}</span>
+            </span>
+            <span class="directions-step-distance">${formatDistanceMeters(instruction?.distance) || '-'}</span>
+        `;
+        list.appendChild(li);
+    });
+
+    const title = panel.querySelector('.directions-title');
+    if (title) {
+        title.textContent = routeName;
+    }
+}
+
+function setDirectionsSidebarOpen(open) {
+    document.body.classList.toggle('right-sidebar-open', open);
+    const sidebar = document.getElementById('rightSidebar');
+    const panel = document.getElementById('directionsPanel');
+    const toggle = document.getElementById('rightSidebarToggle');
+    if (sidebar) {
+        sidebar.setAttribute('aria-hidden', String(!open));
+    }
+    if (panel) {
+        panel.setAttribute('aria-hidden', String(!open));
+    }
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.setAttribute('aria-label', open ? 'Close environmental data and directions' : 'Open environmental data and directions');
+        toggle.setAttribute('title', open ? 'Close environmental data and directions' : 'Environmental data & directions');
+    }
+}
+
+function openDirectionsSidebar() {
+    setDirectionsSidebarOpen(true);
 }
 
 function clearElementChildren(element) {
@@ -775,7 +854,8 @@ function startRoutePreview(map, route, button) {
 
     const animate = timestamp => {
         const elapsed = timestamp - startedAt;
-        const progress = Math.max(0, Math.min(1, elapsed / ROUTE_PREVIEW_DURATION_MS));
+        const linearProgress = Math.max(0, Math.min(1, elapsed / ROUTE_PREVIEW_DURATION_MS));
+        const progress = easeInOutCubic(linearProgress);
         const targetDistance = track.totalLength * progress;
         const previewPosition = interpolateRoutePreviewPosition(track, targetDistance);
         marker.setLatLng(previewPosition);
@@ -797,7 +877,7 @@ function startRoutePreview(map, route, button) {
 
 function getSelectedRouteIndexFromPanel(container, routes, fallbackIndex = 0) {
     const selectedRadio = container?.querySelector?.('input[name="route-selection"]:checked') ||
-        globalThis.document?.querySelector?.('.route-selector input[name="route-selection"]:checked');
+        globalThis.document?.querySelector?.('#directionsRouteSelector .directions-route-card input[name="route-selection"]:checked');
     const selectedIndex = selectedRadio ? Number.parseInt(selectedRadio.dataset.index, 10) : NaN;
 
     if (Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < routes.length) {
@@ -1944,6 +2024,17 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
 // Move the setupRouteControlPanel function definition to module level
 // so it can be used by both route() and routeWithPrecalculatedRoutes()
 
+function getRouteSelectorContainer() {
+    return document.getElementById('directionsRouteSelector');
+}
+
+function clearRouteSelectorContainer() {
+    const container = getRouteSelectorContainer();
+    if (container) {
+        container.innerHTML = '';
+    }
+}
+
 /**
  * Set up the route control panel UI for selecting different routes
  * @param {Object} map - Leaflet map object
@@ -1955,13 +2046,8 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
     console.log(`[setupRouteControlPanel] Setting up control panel with ${routes.length} routes. Condition: ${currentPatientCondition ? currentPatientCondition.name : 'N/A'}, Prefs: ${currentPreferences ? currentPreferences.label : 'N/A'}`);
     stopRoutePreview(map);
 
-    // Remove existing panel if it exists
-    if (window.routeControlPanel) {
-        try {
-            map.removeControl(window.routeControlPanel);
-            window.routeControlPanel = null;
-        } catch (e) { console.warn("[setupRouteControlPanel] Error removing existing panel:", e); }
-    }
+    // Remove existing route selector content from the directions panel
+    clearRouteSelectorContainer();
 
     // Aggressively remove all existing routing controls from the map first
     // This ensures a clean slate before adding the new ones if routes were from a *previous* search.
@@ -1981,6 +2067,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
     routes = deduplicateRoutesForComparison(routes, map, currentRouting);
 
     if (routes.length === 0) {
+        clearRouteSelectorContainer();
         console.warn("[setupRouteControlPanel] No routes available after de-duplication.");
         return;
     }
@@ -2046,7 +2133,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             return;
         }
 
-        const checkedRadio = document.querySelector('.route-selector input[name="route-selection"]:checked');
+        const checkedRadio = document.querySelector('#directionsRouteSelector .directions-route-card input[name="route-selection"]:checked');
         const currentSelectedIndex = checkedRadio ? parseInt(checkedRadio.dataset.index, 10) : initialSelectedIndex;
         const routeName = routeToRemove.routeName || routeToRemove.name || `Route ${routeIndex + 1}`;
 
@@ -2059,14 +2146,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
         }
 
         if (routes.length === 0) {
-            if (window.routeControlPanel) {
-                try {
-                    map.removeControl(window.routeControlPanel);
-                    window.routeControlPanel = null;
-                } catch (error) {
-                    console.warn("[setupRouteControlPanel] Error removing empty route panel:", error);
-                }
-            }
+            clearRouteSelectorContainer();
             toastr.info(`Removed ${routeName}. No comparison routes remain.`);
             console.log(`[setupRouteControlPanel] Removed ${routeName}; removed ${removedCsvRows} CSV row(s).`);
             return;
@@ -2089,294 +2169,199 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
         setupRouteControlPanel(map, routes, currentRouting, currentPatientCondition, currentPreferences, csvData);
     }
 
-    const RoutePanel = L.Control.extend({
-        options: { position: 'topright' },
-        onAdd: function () {
-            const container = L.DomUtil.create('div', 'route-selector');
-            container.style.backgroundColor = 'white';
-            container.style.padding = '10px';
-            container.style.borderRadius = '5px';
-            container.style.boxShadow = '0 0 10px rgba(0,0,0,0.2)';
-            container.style.zIndex = '1000';
-            container.style.maxHeight = '400px';
-            container.style.overflowY = 'auto';
-            container.style.minWidth = '280px';
+    const selectorContainer = getRouteSelectorContainer();
+    if (selectorContainer) {
+        selectorContainer.innerHTML = '';
 
-            const title = L.DomUtil.create('div', 'title', container);
-            title.innerHTML = '<strong>Route Comparison</strong>';
-            title.style.marginBottom = '10px';
-            title.style.fontSize = '16px';
-            title.style.borderBottom = '1px solid #eee';
-            title.style.paddingBottom = '5px';
+        const previewButton = document.createElement('button');
+        previewButton.type = 'button';
+        previewButton.className = 'directions-route-preview';
+        previewButton.innerHTML = '<span class="route-preview-button-icon" aria-hidden="true"></span><span>Preview route</span>';
+        previewButton.setAttribute('aria-label', 'Preview selected route from start to arrival');
+        previewButton.title = 'Preview selected route';
 
-            const instructions = L.DomUtil.create('div', 'instructions', container);
-            instructions.innerHTML = 'Compare direct vs. condition-optimized route:';
-            instructions.style.marginBottom = '12px';
-            instructions.style.fontSize = '13px';
-            instructions.style.color = '#666';
+        const updatePreviewButtonState = () => {
+            const selectedRoute = routes[getSelectedRouteIndexFromPanel(selectorContainer, routes, initialSelectedIndex)];
+            const canPreview = normalizeRoutePreviewPath(selectedRoute).length >= 2;
+            previewButton.disabled = !canPreview;
+            previewButton.title = canPreview ? 'Preview selected route' : 'Select a route with geometry first';
+        };
 
-            const previewControls = L.DomUtil.create('div', 'route-preview-controls', container);
-            const previewButton = L.DomUtil.create('button', 'route-preview-button', previewControls);
-            previewButton.type = 'button';
-            previewButton.title = 'Preview selected route';
-            previewButton.setAttribute('aria-label', 'Preview selected route from start to arrival');
-            previewButton.innerHTML = '<span class="route-preview-button-icon" aria-hidden="true"></span><span>Preview route</span>';
+        previewButton.addEventListener('click', () => {
+            const selectedRoute = routes[getSelectedRouteIndexFromPanel(selectorContainer, routes, initialSelectedIndex)];
+            startRoutePreview(map, selectedRoute, previewButton);
+        });
+        selectorContainer.appendChild(previewButton);
 
-            const updatePreviewButtonState = () => {
-                const selectedRoute = routes[getSelectedRouteIndexFromPanel(container, routes, initialSelectedIndex)];
-                const canPreview = normalizeRoutePreviewPath(selectedRoute).length >= 2;
-                previewButton.disabled = !canPreview;
-                previewButton.title = canPreview ? 'Preview selected route' : 'Select a route with geometry first';
-            };
+        if (routes.length === 2) {
+            const directRoute = routes.find(r => r.isDirectRoute);
+            const optimizedRoute = routes.find(r => !r.isDirectRoute);
+            if (directRoute && optimizedRoute && directRoute.length && optimizedRoute.length) {
+                const directLength = (directRoute.length / 1000).toFixed(2);
+                const optimizedLength = (optimizedRoute.length / 1000).toFixed(2);
+                const lengthDiff = ((optimizedRoute.length - directRoute.length) / directRoute.length * 100).toFixed(0);
+                const directScore = directRoute.score || 0;
+                const optimizedScore = optimizedRoute.score || 0;
+                const scoreDiff = ((optimizedScore - directScore) / Math.max(1, directScore) * 100).toFixed(0);
+                const isLonger = optimizedRoute.length > directRoute.length;
+                const isBetterScore = optimizedScore > directScore;
 
-            L.DomEvent.disableClickPropagation(previewControls);
-            L.DomEvent.disableScrollPropagation(previewControls);
-            L.DomEvent.on(previewButton, 'click', function(e) {
-                L.DomEvent.stop(e);
-                const selectedRoute = routes[getSelectedRouteIndexFromPanel(container, routes, initialSelectedIndex)];
-                startRoutePreview(map, selectedRoute, previewButton);
-            });
-            updatePreviewButtonState();
-
-            if (routes.length === 2) {
-                const comparisonHeader = L.DomUtil.create('div', 'comparison-header', container);
-                comparisonHeader.style.display = 'flex';
-                comparisonHeader.style.justifyContent = 'space-between';
-                comparisonHeader.style.padding = '5px 10px';
-                comparisonHeader.style.backgroundColor = '#f8f9fa';
-                comparisonHeader.style.borderRadius = '4px';
-                comparisonHeader.style.marginBottom = '10px';
-                comparisonHeader.style.fontSize = '12px';
-                comparisonHeader.style.fontWeight = 'bold';
-
-                const directRoute = routes.find(r => r.isDirectRoute);
-                const optimizedRoute = routes.find(r => !r.isDirectRoute);
-
-                if (directRoute && optimizedRoute && directRoute.length && optimizedRoute.length) {
-                    const directLength = (directRoute.length / 1000).toFixed(2);
-                    const optimizedLength = (optimizedRoute.length / 1000).toFixed(2);
-                    const lengthDiff = ((optimizedRoute.length - directRoute.length) / directRoute.length * 100).toFixed(0);
-                    const directScore = directRoute.score || 0;
-                    const optimizedScore = optimizedRoute.score || 0;
-                    const scoreDiff = ((optimizedScore - directScore) / Math.max(1, directScore) * 100).toFixed(0);
-
-                    const comparisonText = L.DomUtil.create('div', 'comparison-text', container);
-                    comparisonText.style.fontSize = '12px';
-                    comparisonText.style.marginBottom = '15px';
-                    comparisonText.style.padding = '5px';
-                    comparisonText.style.backgroundColor = '#f0f8ff';
-                    comparisonText.style.borderRadius = '4px';
-                    comparisonText.style.borderLeft = '3px solid #3498db';
-
-                    const isLonger = optimizedRoute.length > directRoute.length;
-                    const isBetterScore = optimizedScore > directScore;
-
-                    comparisonText.innerHTML = `
-                        <div style="font-weight: bold; margin-bottom: 3px;">Route Comparison:</div>
-                        <div>The optimized route is ${isLonger ? `${lengthDiff}% longer` : `${Math.abs(lengthDiff)}% shorter`} (${optimizedLength} vs ${directLength} km)</div>
-                        <div>Health score is ${isBetterScore ? `${scoreDiff}% better` : `${Math.abs(scoreDiff)}% worse`} (${optimizedScore.toFixed(1)} vs ${directScore.toFixed(1)})</div>
-                    `;
-                }
+                const comparisonText = document.createElement('div');
+                comparisonText.className = 'directions-summary';
+                comparisonText.innerHTML = `
+                    <span>${isLonger ? '↑' : '↓'} ${Math.abs(lengthDiff)}% distance</span>
+                    <span>${isBetterScore ? '↑' : '↓'} ${Math.abs(scoreDiff)}% score</span>
+                `;
+                selectorContainer.appendChild(comparisonText);
             }
+        }
 
-            let directionsPanel = null;
+        routes.forEach((route, index) => {
+            const routeCard = document.createElement('div');
+            routeCard.className = 'directions-route-card' + (index === initialSelectedIndex ? ' directions-route-card--selected' : '');
+            routeCard.dataset.routePanelId = route.routePanelId;
 
-            routes.forEach((route, index) => {
-                const routeBaseColor = getRouteBaseColor(route);
-                const selectedColor = getRouteSelectedColor();
-                const selectedBackgroundColor = getThemeColor('--route-selected-bg', '#fff7ed');
-                const defaultBackgroundColor = getThemeColor('--route-card-bg', '#f5f5f5');
-                const routeItem = L.DomUtil.create('div', 'route-item', container);
-                routeItem.dataset.routePanelId = route.routePanelId;
-                routeItem.style.marginBottom = '10px';
-                routeItem.style.padding = '8px 42px 8px 8px';
-                routeItem.style.backgroundColor = index === initialSelectedIndex ? selectedBackgroundColor : defaultBackgroundColor;
-                routeItem.style.borderRadius = '4px';
-                routeItem.style.cursor = 'pointer';
-                routeItem.style.border = index === initialSelectedIndex ? `3px solid ${selectedColor}` : '1px solid #ddd';
-                routeItem.style.position = 'relative';
-                routeItem.style.transition = 'all 0.2s ease';
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = 'route-selection';
+            radio.checked = index === initialSelectedIndex;
+            radio.dataset.index = index;
 
-                const routeTypeIndicator = L.DomUtil.create('div', 'route-type-indicator', routeItem);
-                routeTypeIndicator.style.position = 'absolute';
-                routeTypeIndicator.style.right = '34px';
-                routeTypeIndicator.style.top = '8px';
-                routeTypeIndicator.style.width = '10px';
-                routeTypeIndicator.style.height = '10px';
-                routeTypeIndicator.style.borderRadius = '50%';
-                routeTypeIndicator.style.backgroundColor = routeBaseColor;
+            const info = document.createElement('div');
+            info.className = 'directions-route-card-info';
+            renderRouteSelectorInfo(info, route, index, index === initialSelectedIndex);
 
-                const removeButton = L.DomUtil.create('button', 'route-remove-button', routeItem);
-                removeButton.type = 'button';
-                removeButton.innerHTML = '&times;';
-                removeButton.title = `Remove ${route.routeName || route.name || `Route ${index + 1}`}`;
-                removeButton.setAttribute('aria-label', removeButton.title);
-                removeButton.style.position = 'absolute';
-                removeButton.style.right = '8px';
-                removeButton.style.top = '4px';
-                removeButton.style.width = '22px';
-                removeButton.style.height = '22px';
-                removeButton.style.border = '1px solid rgba(15, 23, 42, 0.18)';
-                removeButton.style.borderRadius = '50%';
-                removeButton.style.background = 'rgba(255, 255, 255, 0.9)';
-                removeButton.style.color = '#334155';
-                removeButton.style.fontSize = '16px';
-                removeButton.style.lineHeight = '18px';
-                removeButton.style.cursor = 'pointer';
-                removeButton.style.padding = '0';
+            const removeButton = document.createElement('button');
+            removeButton.type = 'button';
+            removeButton.className = 'directions-route-card-remove';
+            removeButton.innerHTML = '&times;';
+            removeButton.title = `Remove ${route.routeName || route.name || `Route ${index + 1}`}`;
+            removeButton.setAttribute('aria-label', removeButton.title);
 
-                const label = L.DomUtil.create('label', '', routeItem);
-                label.style.display = 'flex';
-                label.style.alignItems = 'center';
-                label.style.margin = '0';
-                label.style.width = '100%';
+            routeCard.appendChild(radio);
+            routeCard.appendChild(info);
+            routeCard.appendChild(removeButton);
+            selectorContainer.appendChild(routeCard);
 
-                const radio = L.DomUtil.create('input', '', label);
-                radio.type = 'radio';
-                radio.name = 'route-selection';
-                radio.checked = index === initialSelectedIndex;
-                radio.dataset.index = index;
-                radio.style.marginRight = '10px';
-                radio.style.accentColor = selectedColor;
+            radio.addEventListener('change', function () {
+                if (!this.checked) return;
+                const selectedIdx = parseInt(this.dataset.index, 10);
+                console.log(`[setupRouteControlPanel] Radio changed. Selected route index: ${selectedIdx}`);
+                stopRoutePreview(map);
 
-                const routeInfo = L.DomUtil.create('div', '', label);
-                routeInfo.style.flexGrow = '1';
-
-                renderRouteSelectorInfo(routeInfo, route, index, index === initialSelectedIndex);
-
-                L.DomEvent.on(radio, 'change', function () {
-                    if (!this.checked) return;
-                    const selectedIdx = parseInt(this.dataset.index);
-                    console.log(`[setupRouteControlPanel] Radio changed. Selected route index: ${selectedIdx}`);
-                    stopRoutePreview(map);
-
-                    routes.forEach((r, i) => {
-                        r.isBest = (i === selectedIdx);
-                        if (r.routingControl) {
-                            try {
-	                                if (i === selectedIdx) {
-	                                    console.log(`[setupRouteControlPanel] SHOWING selected route: ${i} (${r.routeName || r.name})`);
-                                        syncRoutingControlLineOptions(r, true);
-	                                    if (r.originalWaypoints && r.originalWaypoints.length > 0) {
-	                                        r.routingControl.getPlan().setWaypoints(r.originalWaypoints);
-	                                    } else {
-                                        console.warn(`[setupRouteControlPanel] Route ${i} has no originalWaypoints to set!`);
-                                        // Attempt to use waypoints from control if available, otherwise, this might fail to draw
-                                        const currentWaypoints = r.routingControl.getWaypoints();
-                                        if (currentWaypoints && currentWaypoints.length > 0 && currentWaypoints[0].latLng) { // Check if they are valid
-                                            r.routingControl.getPlan().setWaypoints(currentWaypoints);
-                                        } else {
-                                            console.error(`[setupRouteControlPanel] Cannot show route ${i}, no valid waypoints found.`);
-                                            return; // Skip this route if no waypoints
-                                        }
-                                    }
-
-                                    if (!map.hasLayer(r.routingControl)) {
-                                        r.routingControl.addTo(map);
-                                        if (!currentRouting.routingControls.includes(r.routingControl)) {
-                                            currentRouting.routingControls.push(r.routingControl);
-                                        }
-                                    }
-
-	                                    // Force re-routing and listen for routesfound to style
-		                                    r.routingControl.once('routesfound', function(e) {
-		                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
-                                                const latestRoutePath = e.routes?.[0];
-                                                if (latestRoutePath) {
-                                                    r.route = latestRoutePath;
-                                                    r.length = latestRoutePath.summary ? latestRoutePath.summary.totalDistance : r.length;
-                                                    r.duration = latestRoutePath.summary ? latestRoutePath.summary.totalTime : r.duration;
-                                                    r.instructions = Array.isArray(latestRoutePath.instructions) ? latestRoutePath.instructions : r.instructions;
-                                                }
-		                                        const routeLine = latestRoutePath?.line || getRouteLineLayer(r);
-		                                        if (routeLine) {
-		                                            routeLine.setStyle(getRouteLineStyle(r, true));
-		                                            if (typeof routeLine.bringToFront === 'function') routeLine.bringToFront();
-		                                        }
-	                                            applyRouteLineStyle(r, true);
-                                                updateRouteDirectionsPanel(r, directionsPanel);
-		                                    });
-		                                    r.routingControl.route(); // Trigger the routing
-
-	                                        if (r.routingControl._container) {
-	                                            $(r.routingControl._container).hide();
-                                        }
-	                                    r.removedFromMap = false;
-
-	                                } else { // For non-selected routes
-	                                    console.log(`[setupRouteControlPanel] HIDING non-selected route: ${i} (${r.routeName || r.name})`);
-                                        syncRoutingControlLineOptions(r, false);
-                                        removeRouteControlFromMap(r, map, currentRouting);
-	                                }
-                            } catch (e) {
-                                console.warn(`[setupRouteControlPanel] Error toggling route ${i} visibility/style:`, e);
-                            }
-		                        }
-		                    });
-
-                    const selectedRouteData = routes[selectedIdx];
-                    updateRouteDirectionsPanel(selectedRouteData, directionsPanel);
-
-		                    // Update UI for all route items (styling the selected item)
-		                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
-	                        const isSelected = (i === selectedIdx);
-	                        const currentRouteForStyle = routes[i]; // get current route for styling
-                            if (!currentRouteForStyle) return;
-	                        item.style.backgroundColor = isSelected ? getThemeColor('--route-selected-bg', '#fff7ed') : getThemeColor('--route-card-bg', '#f5f5f5');
-	                        item.style.border = isSelected ? `3px solid ${getRouteSelectedColor()}` : '1px solid #ddd';
-	                        const textElement = item.querySelector('.route-card-name');
-	                        if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
-	                    });
-                    updatePreviewButtonState();
-
-                    if (typeof Scores !== 'undefined' && Scores.extractScoreData) {
+                routes.forEach((r, i) => {
+                    r.isBest = (i === selectedIdx);
+                    if (r.routingControl) {
                         try {
-                            const selectedRouteData = routes[selectedIdx];
-                            Scores.extractScoreData(
-                                selectedRouteData,
-                                selectedRouteData.environmentDataList || [],
-                                currentPreferences,
-                                currentPatientCondition
-                            );
-    } catch (error) {
-                            console.warn("[setupRouteControlPanel] Error extracting score data:", error);
-	                        }
-	                    }
-	                });
+                            if (i === selectedIdx) {
+                                console.log(`[setupRouteControlPanel] SHOWING selected route: ${i} (${r.routeName || r.name})`);
+                                syncRoutingControlLineOptions(r, true);
+                                if (r.originalWaypoints && r.originalWaypoints.length > 0) {
+                                    r.routingControl.getPlan().setWaypoints(r.originalWaypoints);
+                                } else {
+                                    console.warn(`[setupRouteControlPanel] Route ${i} has no originalWaypoints to set!`);
+                                    const currentWaypoints = r.routingControl.getWaypoints();
+                                    if (currentWaypoints && currentWaypoints.length > 0 && currentWaypoints[0].latLng) {
+                                        r.routingControl.getPlan().setWaypoints(currentWaypoints);
+                                    } else {
+                                        console.error(`[setupRouteControlPanel] Cannot show route ${i}, no valid waypoints found.`);
+                                        return;
+                                    }
+                                }
 
-                L.DomEvent.on(removeButton, 'click', function(e) {
-                    L.DomEvent.stop(e);
-                    removeRouteAtIndex(index);
-                });
+                                if (!map.hasLayer(r.routingControl)) {
+                                    r.routingControl.addTo(map);
+                                    if (!currentRouting.routingControls.includes(r.routingControl)) {
+                                        currentRouting.routingControls.push(r.routingControl);
+                                    }
+                                }
 
-	                L.DomEvent.on(routeItem, 'click', function (e) {
-                        if (e.target === removeButton || removeButton.contains(e.target)) {
-                            return;
+                                r.routingControl.once('routesfound', function(e) {
+                                    console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
+                                    const latestRoutePath = e.routes?.[0];
+                                    if (latestRoutePath) {
+                                        r.route = latestRoutePath;
+                                        r.length = latestRoutePath.summary ? latestRoutePath.summary.totalDistance : r.length;
+                                        r.duration = latestRoutePath.summary ? latestRoutePath.summary.totalTime : r.duration;
+                                        r.instructions = Array.isArray(latestRoutePath.instructions) ? latestRoutePath.instructions : r.instructions;
+                                    }
+                                    const routeLine = latestRoutePath?.line || getRouteLineLayer(r);
+                                    if (routeLine) {
+                                        routeLine.setStyle(getRouteLineStyle(r, true));
+                                        if (typeof routeLine.bringToFront === 'function') routeLine.bringToFront();
+                                    }
+                                    applyRouteLineStyle(r, true);
+                                    renderDirectionsSidebar(r);
+                                });
+                                r.routingControl.route();
+
+                                if (r.routingControl._container) {
+                                    $(r.routingControl._container).hide();
+                                }
+                                r.removedFromMap = false;
+                            } else {
+                                console.log(`[setupRouteControlPanel] HIDING non-selected route: ${i} (${r.routeName || r.name})`);
+                                syncRoutingControlLineOptions(r, false);
+                                removeRouteControlFromMap(r, map, currentRouting);
+                            }
+                        } catch (e) {
+                            console.warn(`[setupRouteControlPanel] Error toggling route ${i} visibility/style:`, e);
                         }
-	                    if (e.target !== radio) {
-	                        radio.checked = true;
-	                        const changeEvent = new Event('change');
-                        radio.dispatchEvent(changeEvent);
                     }
                 });
-                L.DomEvent.on(routeItem, 'mouseover', function() { /* ... hover effects ... */ });
-	                L.DomEvent.on(routeItem, 'mouseout', function() { /* ... hover effects ... */ });
-	            });
-                directionsPanel = L.DomUtil.create('section', 'turn-directions-panel', container);
-                directionsPanel.setAttribute('aria-live', 'polite');
-                directionsPanel.setAttribute('aria-label', 'Indicazioni turn-by-turn');
-                renderRouteDirections(routes[initialSelectedIndex], directionsPanel);
-	            return container;
-	        }
-	    });
 
-    window.routeControlPanel = new RoutePanel();
-    map.addControl(window.routeControlPanel);
+                const selectedRouteData = routes[selectedIdx];
+                renderDirectionsSidebar(selectedRouteData);
+
+                document.querySelectorAll('.directions-route-card').forEach((item, i) => {
+                    const isSelected = (i === selectedIdx);
+                    const currentRouteForStyle = routes[i];
+                    if (!currentRouteForStyle) return;
+                    item.classList.toggle('directions-route-card--selected', isSelected);
+                    const textElement = item.querySelector('.route-card-name');
+                    if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
+                });
+                updatePreviewButtonState();
+
+                if (typeof Scores !== 'undefined' && Scores.extractScoreData) {
+                    try {
+                        const selectedRouteData = routes[selectedIdx];
+                        Scores.extractScoreData(
+                            selectedRouteData,
+                            selectedRouteData.environmentDataList || [],
+                            currentPreferences,
+                            currentPatientCondition
+                        );
+                    } catch (error) {
+                        console.warn("[setupRouteControlPanel] Error extracting score data:", error);
+                    }
+                }
+            });
+
+            removeButton.addEventListener('click', function(e) {
+                e.stopPropagation();
+                removeRouteAtIndex(index);
+            });
+
+            routeCard.addEventListener('click', function(e) {
+                if (e.target === removeButton || removeButton.contains(e.target)) {
+                    return;
+                }
+                if (e.target !== radio) {
+                    radio.checked = true;
+                    radio.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            });
+        });
+
+        updatePreviewButtonState();
+        renderDirectionsSidebar(routes[initialSelectedIndex]);
+    }
 
     // Make sure we trigger the change event for the initially selected route
     // This ensures the correct route is displayed and its data extracted on load
     setTimeout(() => {
-        const initialRadio = document.querySelector(`.route-selector input[data-index="${initialSelectedIndex}"]`);
+        const initialRadio = document.querySelector(`#directionsRouteSelector .directions-route-card input[data-index="${initialSelectedIndex}"]`);
         if (initialRadio) {
             console.log(`[setupRouteControlPanel] Triggering change for initial radio: index ${initialSelectedIndex}`);
             const changeEvent = new Event('change', { bubbles: true });
@@ -2386,6 +2371,8 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             Scores.extractScoreData(routes[0], routes[0].environmentDataList || [], currentPreferences, currentPatientCondition);
         }
     }, 150); // Slightly increased timeout to ensure DOM is fully ready
+
+    openDirectionsSidebar();
 }
 
 // Internal helper function to format scores for display
@@ -2766,9 +2753,7 @@ async function route(
             });
             currentRouting.routingControls = [];
         }
-        if (window.routeControlPanel) {
-            try { map.removeControl(window.routeControlPanel); window.routeControlPanel = null; } catch (e) { console.warn("Error removing panel");}
-        }
+        clearRouteSelectorContainer();
         if (window.routeInfoLabels) {
             window.routeInfoLabels.forEach(l => { if (l && l._map) map.removeLayer(l); });
             window.routeInfoLabels = [];
@@ -3261,5 +3246,7 @@ function mapEnvironmentalDataToCoordinates(environmentDataList, coordinates) {
 
 export {
     route,
-    collectRouteAnalyticsData
+    collectRouteAnalyticsData,
+    renderDirectionsSidebar,
+    openDirectionsSidebar
 }

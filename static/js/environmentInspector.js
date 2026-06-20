@@ -75,11 +75,7 @@ const LEVEL_THRESHOLDS = {
 
 document.addEventListener('DOMContentLoaded', () => {
     const elements = {
-        toggle: document.getElementById('envInspectorToggle'),
-        close: document.getElementById('envInspectorClose'),
         refresh: document.getElementById('envInspectorRefresh'),
-        panel: document.getElementById('envInspectorPanel'),
-        scrim: document.getElementById('envInspectorScrim'),
         aqi: document.getElementById('envInspectorAqi'),
         pathologies: document.getElementById('envInspectorPathologies'),
         location: document.getElementById('envInspectorLocation'),
@@ -88,22 +84,18 @@ document.addEventListener('DOMContentLoaded', () => {
         patientCondition: document.getElementById('patientCondition')
     };
 
-    if (!elements.toggle || !elements.panel || !elements.groups) {
+    if (!elements.groups) {
         return;
     }
 
     let abortController = null;
-    let latestSuccessfulRequestKey = '';
+    let cachedRequestKey = '';
+    let cachedPayload = null;
     const debouncedReload = debounce(() => {
-        if (isOpen()) {
-            loadEnvironmentData();
-        }
+        loadEnvironmentData();
     }, 350);
 
-    elements.toggle.addEventListener('click', () => setOpen(!isOpen()));
-    elements.close?.addEventListener('click', () => setOpen(false));
     elements.refresh?.addEventListener('click', () => loadEnvironmentData({ force: true }));
-    elements.scrim?.addEventListener('click', () => setOpen(false));
     elements.patientCondition?.addEventListener('change', () => {
         window.setTimeout(() => {
             if (isOpen()) {
@@ -112,39 +104,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 0);
     });
 
-    document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && isOpen()) {
-            setOpen(false);
-        }
-    });
-
     waitForMap().then((map) => {
         map.on('moveend', debouncedReload);
     }).catch(() => {
         // The drawer can still use the default app center if Leaflet is not ready.
     });
 
-    function isOpen() {
-        return document.body.classList.contains('env-inspector-open');
-    }
-
-    function setOpen(open) {
-        document.body.classList.toggle('env-inspector-open', open);
-        elements.panel.setAttribute('aria-hidden', String(!open));
-        elements.toggle.setAttribute('aria-expanded', String(open));
-        elements.toggle.setAttribute('aria-label', open ? 'Close environmental data panel' : 'Open environmental data panel');
-        elements.toggle.setAttribute('title', open ? 'Close environmental data' : 'Environmental data');
-        if (elements.scrim) {
-            elements.scrim.hidden = !open;
-        }
-
-        if (open) {
+    // The unified right sidebar is controlled by map.js / routes.js.
+    // Whenever it opens, load (or render cached) environmental data for the current view.
+    const openObserver = new MutationObserver(() => {
+        if (isOpen()) {
             loadEnvironmentData();
-            window.setTimeout(() => elements.close?.focus({ preventScroll: true }), 120);
-            return;
         }
+    });
+    openObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
-        elements.toggle.focus({ preventScroll: true });
+    function isOpen() {
+        return document.body.classList.contains('right-sidebar-open');
     }
 
     async function loadEnvironmentData(options = {}) {
@@ -153,14 +129,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const requestKey = `${point.lat.toFixed(4)},${point.lon.toFixed(4)}:${pathologies.join(',')}`;
 
         updateContext(point, pathologies);
-        if (!options.force && requestKey === latestSuccessfulRequestKey && elements.groups.childElementCount > 0) {
+
+        // If we already have fresh cached data for this location/pathology, render it when open.
+        if (!options.force && requestKey === cachedRequestKey && cachedPayload) {
+            if (isOpen()) {
+                renderPayload(cachedPayload, point, pathologies);
+            }
             return;
         }
 
         abortController?.abort();
         abortController = new AbortController();
 
-        renderLoading(pathologies);
+        // Only show skeleton when the drawer is open; preload silently in the background when closed.
+        if (isOpen()) {
+            renderLoading(pathologies);
+        }
 
         try {
             const params = new URLSearchParams({
@@ -178,14 +162,20 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const payload = await response.json();
-            renderPayload(payload, point, pathologies);
-            latestSuccessfulRequestKey = requestKey;
+            cachedPayload = payload;
+            cachedRequestKey = requestKey;
+            if (isOpen()) {
+                renderPayload(payload, point, pathologies);
+            }
         } catch (error) {
             if (error.name === 'AbortError') {
                 return;
             }
-            latestSuccessfulRequestKey = '';
-            renderError(error, point, pathologies);
+            cachedRequestKey = '';
+            cachedPayload = null;
+            if (isOpen()) {
+                renderError(error, point, pathologies);
+            }
         }
     }
 

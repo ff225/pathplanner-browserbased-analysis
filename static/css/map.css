@@ -624,6 +624,8 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .leaflet-routing-container.leaflet-control {
+    /* The custom directions panel below is the single visible itinerary UI. */
+    display: none;
     max-height: 300px;
     max-width: min(500px, calc(100vw - 48px));
     overflow-y: auto;
@@ -632,6 +634,59 @@ input[type="range"]::-moz-range-thumb {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-md);
+}
+
+.route-card-content {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.route-card-heading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.route-card-name {
+    min-width: 0;
+    color: var(--color-text);
+    font-size: 0.9rem;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.route-type-label {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    color: var(--color-primary-strong);
+    background: var(--color-primary-soft);
+    border-radius: var(--radius-sm);
+    font-size: 0.64rem;
+    font-weight: 750;
+    letter-spacing: 0;
+}
+
+.route-type-label-direct {
+    color: var(--color-navigation-strong);
+    background: var(--color-surface-muted);
+}
+
+.route-card-meta {
+    color: var(--color-primary-strong);
+    font-size: 0.78rem;
+    font-weight: 750;
+    line-height: 1.25;
+}
+
+.route-card-description {
+    color: var(--color-text-muted);
+    font-size: 0.76rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
 }
 
 .route-selector .turn-directions-panel {
@@ -671,10 +726,10 @@ input[type="range"]::-moz-range-thumb {
 .turn-directions-list {
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 8px;
     max-height: 260px;
     margin: 10px 0 0;
-    padding: 0;
+    padding: 0 4px 0 0;
     overflow-y: auto;
     list-style: none;
 }
@@ -698,12 +753,14 @@ input[type="range"]::-moz-range-thumb {
     grid-template-columns: 32px minmax(0, 1fr) auto;
     gap: 10px;
     align-items: start;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--color-border);
+    padding: 10px;
+    background: var(--color-surface-soft);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
 }
 
 .turn-directions-step:last-child {
-    border-bottom: 0;
+    border-bottom: 1px solid var(--color-border);
 }
 
 .turn-directions-icon {

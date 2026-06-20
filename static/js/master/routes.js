@@ -353,6 +353,59 @@ function updateRouteDirectionsPanel(route, directionsPanel) {
     renderRouteDirections(route, directionsPanel);
 }
 
+function clearElementChildren(element) {
+    while (element.firstChild) {
+        element.removeChild(element.firstChild);
+    }
+}
+
+function isTechnicalRouteDescription(description) {
+    return /A\* Cost|Grid environmental A\*|search nodes|nodes explored|heuristic|raw A\*|real data/i.test(description);
+}
+
+function getUserFacingRouteDescription(route) {
+    const description = typeof route?.description === 'string' ? route.description.trim() : '';
+    if (description && !isTechnicalRouteDescription(description)) {
+        return description;
+    }
+
+    return route?.isDirectRoute
+        ? 'Percorso diretto standard'
+        : 'Percorso ottimizzato per il profilo clinico';
+}
+
+function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
+    if (!routeInfo) {
+        return;
+    }
+
+    clearElementChildren(routeInfo);
+    routeInfo.className = 'route-card-content';
+
+    const heading = L.DomUtil.create('div', 'route-card-heading', routeInfo);
+    const name = L.DomUtil.create('span', 'route-card-name', heading);
+    name.textContent = route.routeName || route.name || `Route ${index + 1}`;
+    name.style.fontWeight = isSelected ? 'bold' : 'normal';
+
+    const routeType = L.DomUtil.create(
+        'span',
+        route.isDirectRoute ? 'route-type-label route-type-label-direct' : 'route-type-label route-type-label-optimized',
+        heading
+    );
+    routeType.textContent = route.isDirectRoute ? 'DIRECT' : 'OPTIMIZED';
+
+    const distanceSummary = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const durationSummary = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
+    const summaryValues = [distanceSummary, durationSummary].filter(Boolean);
+    if (summaryValues.length > 0) {
+        const meta = L.DomUtil.create('div', 'route-card-meta', routeInfo);
+        meta.textContent = summaryValues.join(' / ');
+    }
+
+    const description = L.DomUtil.create('div', 'route-card-description', routeInfo);
+    description.textContent = getUserFacingRouteDescription(route);
+}
+
 function parseCoordinateValue(value) {
     const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : null;
@@ -970,6 +1023,7 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
             waypoints: [startLatLng, endLatLng],
             routeWhileDragging: false,
             fitSelectedRoutes: true,
+            show: false,
             showAlternatives: false, // Keep it simple for fallback
             lineOptions: {
                 styles: getRouteLineStyles({ isDirectRoute: true }, true),
@@ -1852,13 +1906,13 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                 const routeLine = getRouteLineLayer(route);
                 syncRoutingControlLineOptions(route, index === initialSelectedIndex);
                 if (index === initialSelectedIndex) {
-                    console.log(`[setupRouteControlPanel] Initially ADDING & SHOWING route ${index}: ${route.routeName || route.name}`);
+                    console.log(`[setupRouteControlPanel] Initially adding selected route line ${index}: ${route.routeName || route.name}`);
                     if (!map.hasLayer(route.routingControl)) {
                         route.routingControl.addTo(map);
                         currentRouting.routingControls.push(route.routingControl); // Add to managed list
                     }
                     if (route.routingControl._container) {
-                        $(route.routingControl._container).show();
+                        $(route.routingControl._container).hide();
                     }
                     if (routeLine) {
                         if (!map.hasLayer(routeLine)) map.addLayer(routeLine);
@@ -2089,45 +2143,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                 const routeInfo = L.DomUtil.create('div', '', label);
                 routeInfo.style.flexGrow = '1';
 
-                let displayScore, scoreLabel, scoreTooltip;
-                // Check if rawAStarScore is present and is a valid number
-                if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
-                    displayScore = route.rawAStarScore.toFixed(1);
-                    scoreLabel = "A* Cost";
-                    scoreTooltip = " (lower is better)";
-                } else {
-                    displayScore = (route.score !== undefined && route.score !== null && isFinite(route.score)) ? route.score.toFixed(1) : "N/A";
-                    scoreLabel = "Score";
-                    scoreTooltip = " (higher is better)";
-                }
-
-                let scoreColor = '#e74c3c'; // Default for low scores/high costs
-                if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
-                    // Colors for A* cost (lower is better)
-                    if (route.rawAStarScore <= 50) scoreColor = '#2ecc71';      // Very Good
-                    else if (route.rawAStarScore <= 150) scoreColor = '#27ae60'; // Good
-                    else if (route.rawAStarScore <= 300) scoreColor = '#f39c12'; // Okay
-                    else if (route.rawAStarScore <= 500) scoreColor = '#e67e22'; // Poor
-                } else if (route.score !== undefined && route.score !== null && isFinite(route.score)) {
-                    // Colors for regular score (higher is better)
-                    if (route.score >= 8) scoreColor = '#2ecc71';
-                    else if (route.score >= 6) scoreColor = '#27ae60';
-                    else if (route.score >= 4) scoreColor = '#f39c12';
-                    else if (route.score >= 2) scoreColor = '#e67e22';
-                }
-
-                const routeTypeLabel = route.isDirectRoute ?
-                    '<span style="background-color: #e3f2fd; color: #3498db; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">DIRECT</span>' :
-                    '<span style="background-color: #e8f5e9; color: #2ecc71; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">OPTIMIZED</span>';
-
-                routeInfo.innerHTML = `
-                    <div style="font-weight: ${index === initialSelectedIndex ? 'bold' : 'normal'}; font-size: 14px;">${route.routeName || route.name || `Route ${index+1}`} ${routeTypeLabel}</div>
-                    <div style="font-size: 12px; margin-top: 4px; display: flex; justify-content: space-between;">
-                        <span style="color: ${scoreColor}; font-weight: bold;" title="${scoreLabel}${scoreTooltip}">${scoreLabel}: ${displayScore}</span>
-                        <span></span>
-                    </div>
-                    <div style="font-size: 11px; color: #888; margin-top: 3px;">${route.description || (route.isDirectRoute ? "Standard direct route" : "Health-optimized route")}</div>
-                `;
+                renderRouteSelectorInfo(routeInfo, route, index, index === initialSelectedIndex);
 
                 L.DomEvent.on(radio, 'change', function () {
                     if (!this.checked) return;
@@ -2184,7 +2200,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
 		                                    r.routingControl.route(); // Trigger the routing
 
 	                                        if (r.routingControl._container) {
-	                                            $(r.routingControl._container).show();
+	                                            $(r.routingControl._container).hide();
                                         }
 	                                    r.removedFromMap = false;
 
@@ -2209,7 +2225,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                             if (!currentRouteForStyle) return;
 	                        item.style.backgroundColor = isSelected ? getThemeColor('--route-selected-bg', '#fff7ed') : getThemeColor('--route-card-bg', '#f5f5f5');
 	                        item.style.border = isSelected ? `3px solid ${getRouteSelectedColor()}` : '1px solid #ddd';
-	                        const textElement = item.querySelector('div > div:first-child');
+	                        const textElement = item.querySelector('.route-card-name');
 	                        if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
 	                    });
                     updatePreviewButtonState();
@@ -2690,6 +2706,7 @@ async function route(
                 routePromises.push(new Promise(async (resolveRoutePromise) => {
 	                    const directRouteControl = L.Routing.control({
 	                        waypoints,
+                            show: false,
 	                        router: createMapboxRouter('walking'),
 	                        createMarker: function() { return null; },
                             lineOptions: {
@@ -2726,6 +2743,7 @@ async function route(
 
                         const altRouteControl = L.Routing.control({
                             waypoints: altRouteWaypointsForControl,
+                            show: false,
                             router: createMapboxRouter('walking'),
 	                            createMarker: function() { return null; },
 	                            lineOptions: {
@@ -2758,6 +2776,7 @@ async function route(
                 routePromises.push(new Promise((resolveRoutePromise) => {
                     const directRouteControl = L.Routing.control({
                         waypoints,
+                        show: false,
                         router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
 	                        createMarker: function() { return null; },
 	                        lineOptions: {
@@ -2981,6 +3000,7 @@ async function routeWithPrecalculatedRoutes(
 	                waypoints: waypoints,
 	                routeWhileDragging: false,
 	                fitSelectedRoutes: true,
+                    show: false,
 	                showAlternatives: false,
 	                lineOptions: {
 	                    styles: initialRouteStyle,

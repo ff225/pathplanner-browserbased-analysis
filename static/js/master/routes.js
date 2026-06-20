@@ -1481,7 +1481,7 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
 }
 
 // Modify the generateConditionSpecificRoutes function
-async function generateConditionSpecificRoutes(condition, waypoints, transportMode) {
+async function generateConditionSpecificRoutes(condition, waypoints, transportMode, currentPreferences) {
     try {
         console.log(`[generateConditionSpecificRoutes] Environmental A* + Mapbox for ${condition.name}`);
 
@@ -1498,7 +1498,7 @@ async function generateConditionSpecificRoutes(condition, waypoints, transportMo
             condition,
             transportMode,
             condition.isPatientMode ? 3 : 2,
-            { preferAStar: true }
+            { preferAStar: true, preferences: currentPreferences }
         );
 
         console.log(`[generateConditionSpecificRoutes] ${optimizedRoutes.length} route(s) for ${condition.name}`);
@@ -2810,7 +2810,7 @@ async function route(
 
             if (currentPatientCondition.isPatientMode) {
                 const routePatterns = await generateConditionSpecificRoutes(
-                    currentPatientCondition, waypointInputs, additionalInfos.transportMode
+                    currentPatientCondition, waypointInputs, additionalInfos.transportMode, currentPreferences
                 );
                 console.log("[route-async-block] Generated route patterns:", routePatterns);
                 if (!routePatterns || routePatterns.length === 0) {

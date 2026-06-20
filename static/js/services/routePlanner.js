@@ -195,6 +195,7 @@ export async function generateOptimizedRoutes(
     options = {}
 ) {
     const preferAStar = options.preferAStar !== false;
+    const preferences = options.preferences || null;
     const usePatientAStar =
         preferAStar &&
         patientCondition.isPatientMode &&
@@ -239,6 +240,7 @@ export async function generateOptimizedRoutes(
                         map,
                         patientCondition,
                         astarRouteCount,
+                        preferences,
                     ),
                     astarMs,
                     'Environmental A*'

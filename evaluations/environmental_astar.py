@@ -22,6 +22,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 3,
         'temperatureSensitivity': 8,
         'humiditySensitivity': 9,
+        'patientNature': 10,
+        'patientEntertainment': 3,
+        'patientNightlife': 0,
+        'patientTourism': 2,
+        'patientHospital': 8,
     },
     'cardiac': {
         'name': 'cardiac',
@@ -30,6 +35,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 4,
         'temperatureSensitivity': 8,
         'humiditySensitivity': 5,
+        'patientNature': 7,
+        'patientEntertainment': 2,
+        'patientNightlife': 0,
+        'patientTourism': 2,
+        'patientHospital': 10,
     },
     'mobility': {
         'name': 'mobility',
@@ -38,6 +48,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 2,
         'temperatureSensitivity': 3,
         'humiditySensitivity': 3,
+        'patientNature': 4,
+        'patientEntertainment': 3,
+        'patientNightlife': 1,
+        'patientTourism': 2,
+        'patientHospital': 7,
     },
     'mental': {
         'name': 'mental',
@@ -46,6 +61,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 9,
         'temperatureSensitivity': 4,
         'humiditySensitivity': 2,
+        'patientNature': 10,
+        'patientEntertainment': 7,
+        'patientNightlife': 2,
+        'patientTourism': 5,
+        'patientHospital': 4,
     },
     'arthritis': {
         'name': 'arthritis',
@@ -54,6 +74,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 2,
         'temperatureSensitivity': 9,
         'humiditySensitivity': 10,
+        'patientNature': 3,
+        'patientEntertainment': 4,
+        'patientNightlife': 1,
+        'patientTourism': 2,
+        'patientHospital': 6,
     },
     'diabetes': {
         'name': 'diabetes',
@@ -62,6 +87,24 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 3,
         'temperatureSensitivity': 5,
         'humiditySensitivity': 4,
+        'patientNature': 6,
+        'patientEntertainment': 4,
+        'patientNightlife': 0,
+        'patientTourism': 3,
+        'patientHospital': 9,
+    },
+    'default': {
+        'name': 'default',
+        'airQualitySensitivity': 0,
+        'slopeSensitivity': 0,
+        'noiseSensitivity': 0,
+        'temperatureSensitivity': 0,
+        'humiditySensitivity': 0,
+        'patientNature': 0,
+        'patientEntertainment': 0,
+        'patientNightlife': 0,
+        'patientTourism': 0,
+        'patientHospital': 0,
     },
 }
 
@@ -179,6 +222,7 @@ def calculate_edge_cost(
     neighbor: Dict[str, float],
     current_g: float,
     patient: Dict[str, Any],
+    preferences: Optional[Dict[str, float]] = None,
 ) -> float:
     """Port of environmentalAStar.js calculateCost (g-score increment)."""
     cost = current_g + haversine_m(current, neighbor)
@@ -223,6 +267,28 @@ def calculate_edge_cost(
         cost += env['sensoryLoad'] * 2.0
         cost -= env['greenVisibility'] * 8.0
 
+    # Preference-weight adjustments (combined pathology + user preference)
+    prefs = preferences or {}
+    combined_nature = patient.get('patientNature', 0) + prefs.get('nature', 0)
+    if combined_nature and 'greenVisibility' in env:
+        cost -= env['greenVisibility'] * combined_nature * 0.8
+
+    combined_hospital = patient.get('patientHospital', 0) + prefs.get('hospital', 0)
+    if combined_hospital and 'emergencyAccessibility' in env:
+        cost -= env['emergencyAccessibility'] * combined_hospital * 0.8
+
+    combined_entertainment = patient.get('patientEntertainment', 0) + prefs.get('entertainment', 0)
+    if combined_entertainment and 'noise' in env:
+        cost -= (env['noise'] / 10) * combined_entertainment * 0.8
+
+    combined_nightlife = patient.get('patientNightlife', 0) + prefs.get('nightlife', 0)
+    if combined_nightlife and 'noise' in env:
+        cost -= (env['noise'] / 10) * combined_nightlife * 0.8
+
+    combined_tourism = patient.get('patientTourism', 0) + prefs.get('tourism', 0)
+    if combined_tourism and 'greenVisibility' in env:
+        cost -= env['greenVisibility'] * combined_tourism * 0.8
+
     return cost
 
 
@@ -251,6 +317,7 @@ def find_optimal_route(
     end_lon: float,
     condition: str = 'respiratory',
     grid_resolution_m: Optional[float] = None,
+    preferences: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     Environmental A* search. Returns grid path, internal astar_cost (lower=better),
@@ -308,7 +375,7 @@ def find_optimal_route(
             if nid in closed:
                 continue
 
-            tentative = calculate_edge_cost(current, neighbor, g_score[cid], patient)
+            tentative = calculate_edge_cost(current, neighbor, g_score[cid], patient, preferences)
 
             if nid not in g_score or tentative < g_score[nid]:
                 came_from[nid] = current

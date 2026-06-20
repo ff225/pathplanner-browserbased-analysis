@@ -76,6 +76,35 @@ def _parse_lat_lon_pair(start_location, end_location):
         return None
 
 
+def _extract_preferences(request):
+    """Build a preferences dict from GET params or JSON body, returning None if absent."""
+    keys = ['nature', 'entertainment', 'tourism', 'nightlife', 'hospital']
+    prefs = {}
+    for key in keys:
+        value = request.GET.get(key)
+        if value is not None:
+            try:
+                prefs[key] = float(value)
+            except ValueError:
+                pass
+    if prefs:
+        return prefs
+
+    if request.method == 'POST':
+        try:
+            body = json.loads(request.body.decode('utf-8') or '{}')
+        except json.JSONDecodeError:
+            return None
+        for key in keys:
+            value = body.get(key)
+            if value is not None:
+                try:
+                    prefs[key] = float(value)
+                except (ValueError, TypeError):
+                    pass
+    return prefs if prefs else None
+
+
 def _ors_decode_summary(ors_data):
     if 'features' in ors_data and ors_data['features']:
         summary = ors_data['features'][0].get('properties', {}).get('summary', {})
@@ -156,7 +185,7 @@ def _score_waypoints_path(coords_lat_lon, condition, optimized):
     return round(mean_score, 1), sources_agg
 
 
-def compute_astar_optimized_route(start_location, end_location, condition='respiratory'):
+def compute_astar_optimized_route(start_location, end_location, condition='respiratory', preferences=None):
     """
     Grid Environmental A* (environmentalAStar.js findOptimalRoute) + ORS snap + multifactor score.
     """
@@ -165,7 +194,7 @@ def compute_astar_optimized_route(start_location, end_location, condition='respi
         return {'error': 'invalid coordinates'}
     s_lat, s_lon, e_lat, e_lon = parsed
 
-    astar = find_optimal_route(s_lat, s_lon, e_lat, e_lon, condition)
+    astar = find_optimal_route(s_lat, s_lon, e_lat, e_lon, condition, preferences=preferences)
     path = astar['path']
     coords = simplify_path_for_routing(path)
 
@@ -274,7 +303,8 @@ def astar_route(request):
     if not (start_location and end_location):
         return JsonResponse({'error': 'start and end params required'}, status=400)
     condition = request.GET.get('condition', 'respiratory')
-    result = compute_astar_optimized_route(start_location, end_location, condition)
+    preferences = _extract_preferences(request)
+    result = compute_astar_optimized_route(start_location, end_location, condition, preferences=preferences)
     if 'error' in result:
         return JsonResponse(result, status=400)
     return JsonResponse(result)
@@ -291,12 +321,13 @@ def optimized_route(request):
         return JsonResponse({'error': 'start and end params required'}, status=400)
     condition = request.GET.get('condition', 'respiratory')
     mode = (request.GET.get('mode') or 'astar').lower()
+    preferences = _extract_preferences(request)
 
     if mode == 'waypoints':
         result = compute_optimized_pathplanner_route(start_location, end_location, condition)
     elif mode == 'both':
         wp = compute_optimized_pathplanner_route(start_location, end_location, condition)
-        ast = compute_astar_optimized_route(start_location, end_location, condition)
+        ast = compute_astar_optimized_route(start_location, end_location, condition, preferences=preferences)
         if 'error' in wp or 'error' in ast:
             return JsonResponse({'error': wp.get('error') or ast.get('error')}, status=400)
         result = {
@@ -307,7 +338,7 @@ def optimized_route(request):
             'scoring_method': 'comparison_both',
         }
     else:
-        result = compute_astar_optimized_route(start_location, end_location, condition)
+        result = compute_astar_optimized_route(start_location, end_location, condition, preferences=preferences)
 
     if 'error' in result:
         return JsonResponse(result, status=400)

@@ -22,7 +22,7 @@ import { lookupEnv } from '../data/envTileIndex.js';
  * @param {Number} gridResolution - Resolution of the search grid (in meters)
  * @returns {Object} Best route found
  */
-export async function findOptimalRoute(start, goal, map, patientCondition, environmentalData = null, gridResolution = 100) {
+export async function findOptimalRoute(start, goal, map, patientCondition, environmentalData = null, gridResolution = 100, preferences = null) {
     console.log("Starting Environmental A* pathfinding algorithm");
     console.log(`Start: (${start.lat}, ${start.lon}), Goal: (${goal.lat}, ${goal.lon})`);
     console.log(`Patient condition: ${patientCondition.name}`);
@@ -80,7 +80,7 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
             if (closedSet.has(neighborId)) continue;
             
             // Calculate tentative g-score (distance + environmental factors)
-            const tentativeGScore = await calculateCost(current, neighbor, gScore[currentId], patientCondition, environmentalData);
+            const tentativeGScore = await calculateCost(current, neighbor, gScore[currentId], patientCondition, environmentalData, preferences);
             
             // Check if this path is better than any previous one
             const neighborInOpenSet = openSet.contains(neighborId);
@@ -180,7 +180,7 @@ function getNeighbors(node, grid, resolution) {
  * @param {Array} environmentalData - Pre-loaded environmental data
  * @returns {Number} Cost value (g-score)
  */
-async function calculateCost(current, neighbor, currentGScore, patientCondition, environmentalData) {
+async function calculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, preferences = null) {
     // Base cost is the physical distance
     const distance = calculateDistance(current, neighbor);
     let cost = currentGScore + distance;
@@ -286,6 +286,31 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
                     cost -= envData.greenVisibility * 8;
                 }
                 break;
+        }
+    }
+    
+    // Apply user-preference weights alongside the pathology profile
+    if (patientCondition) {
+        const combinedNature = (patientCondition.patientNature || 0) + (preferences?.nature || 0);
+        const combinedEntertainment = (patientCondition.patientEntertainment || 0) + (preferences?.entertainment || 0);
+        const combinedNightlife = (patientCondition.patientNightlife || 0) + (preferences?.nightlife || 0);
+        const combinedTourism = (patientCondition.patientTourism || 0) + (preferences?.tourism || 0);
+        const combinedHospital = (patientCondition.patientHospital || 0) + (preferences?.hospital || 0);
+
+        if (combinedNature !== 0 && envData.greenVisibility != null) {
+            cost -= envData.greenVisibility * combinedNature * 0.8;
+        }
+        if (combinedHospital !== 0 && envData.emergencyAccessibility != null) {
+            cost -= envData.emergencyAccessibility * combinedHospital * 0.8;
+        }
+        if (combinedEntertainment !== 0 && envData.noise != null) {
+            cost -= (envData.noise / 10) * combinedEntertainment * 0.8;
+        }
+        if (combinedNightlife !== 0 && envData.noise != null) {
+            cost -= (envData.noise / 10) * combinedNightlife * 0.8;
+        }
+        if (combinedTourism !== 0 && envData.greenVisibility != null) {
+            cost -= envData.greenVisibility * combinedTourism * 0.8;
         }
     }
     
@@ -535,7 +560,7 @@ class PriorityQueue {
  * @param {Number} numRoutes - Number of alternative routes to generate
  * @returns {Array} Array of routes
  */
-export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3) {
+export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3, preferences = null) {
     const benchmarkMode = window.PATHPLANNER_BENCHMARK === true;
     const effectiveNumRoutes = benchmarkMode
         ? Math.min(numRoutes, window.BENCHMARK_ASTAR_NUM_ROUTES ?? 1)
@@ -560,6 +585,7 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
         patientCondition,
         environmentalData,
         gridResolution,
+        preferences,
     );
     
     // Add environmental data to route
@@ -598,8 +624,8 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
         
         // Create a modified cost calculation function with penalties
         const originalCalculateCost = calculateCost;
-        const calculateCostWithPenalties = async (current, neighbor, currentGScore, patientCondition, environmentalData) => {
-            let cost = await originalCalculateCost(current, neighbor, currentGScore, patientCondition, environmentalData);
+        const calculateCostWithPenalties = async (current, neighbor, currentGScore, patientCondition, environmentalData, prefs) => {
+            let cost = await originalCalculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, prefs);
             
             // Add penalties for previously visited nodes
             const neighborId = nodeToId(neighbor);
@@ -620,6 +646,7 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
             patientCondition,
             environmentalData,
             gridResolution,
+            preferences,
         );
         
         // Collect specific environmental data for this alternative route

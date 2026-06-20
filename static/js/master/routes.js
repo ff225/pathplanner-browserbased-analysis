@@ -10,11 +10,16 @@ import * as RoutePlanner from '../services/routePlanner.js';
 const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
 const ROUTE_COORDINATE_PRECISION = 5;
 const ROUTE_PREVIEW_DURATION_MS = 6500;
+const ROUTE_PREVIEW_FOLLOW_ZOOM = 17;
+const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 140;
 const routePreviewState = {
     marker: null,
     animationFrame: null,
     activeButton: null,
-    activeRoutePanelId: null
+    activeRoutePanelId: null,
+    restoreView: null,
+    followZoom: null,
+    lastCameraUpdateAt: 0
 };
 const MAPBOX_DIRECTIONS_LANGUAGE = 'it';
 const MAPBOX_DIRECTIONS_ROUTING_OPTIONS = Object.freeze({
@@ -451,23 +456,24 @@ function getRouteCoordinates(route) {
     const lineCoordinates = routeLine && typeof routeLine.getLatLngs === 'function'
         ? flattenCoordinateList(routeLine.getLatLngs())
         : [];
+    const routeControl = route.routingControl;
 
     const candidates = [
-        route.coordinates,
         route.route?.coordinates,
-        route.routingControl?._routes?.[0]?.coordinates,
+        routeControl?._selectedRoute?.coordinates,
+        routeControl?._routes?.[0]?.coordinates,
         lineCoordinates,
+        route.coordinates,
         route.originalWaypoints,
         route.waypoints
-    ];
+    ].map(flattenCoordinateList);
 
-    for (const coordinates of candidates) {
-        if (Array.isArray(coordinates) && coordinates.length > 0) {
-            return flattenCoordinateList(coordinates);
-        }
+    const fullGeometry = candidates.find(coordinates => coordinates.length > 2);
+    if (fullGeometry) {
+        return fullGeometry;
     }
 
-    return [];
+    return candidates.find(coordinates => coordinates.length > 1) || [];
 }
 
 function normalizeRoutePreviewPath(route) {
@@ -532,6 +538,82 @@ function buildRoutePreviewTrack(path) {
     }
 
     return { path, segmentLengths, totalLength };
+}
+
+function captureRoutePreviewView(map) {
+    if (!map || typeof map.getCenter !== 'function' || typeof map.getZoom !== 'function') {
+        return null;
+    }
+
+    return {
+        center: map.getCenter(),
+        zoom: map.getZoom()
+    };
+}
+
+function getRoutePreviewFollowZoom(map) {
+    if (!map || typeof map.getZoom !== 'function') {
+        return ROUTE_PREVIEW_FOLLOW_ZOOM;
+    }
+
+    const currentZoom = Number(map.getZoom());
+    const preferredZoom = Math.max(
+        Number.isFinite(currentZoom) ? currentZoom + 2 : ROUTE_PREVIEW_FOLLOW_ZOOM,
+        ROUTE_PREVIEW_FOLLOW_ZOOM
+    );
+    const maxZoom = typeof map.getMaxZoom === 'function' ? Number(map.getMaxZoom()) : NaN;
+
+    return Number.isFinite(maxZoom) ? Math.min(preferredZoom, maxZoom) : preferredZoom;
+}
+
+function restoreRoutePreviewView(map, animate = true) {
+    const restoreView = routePreviewState.restoreView;
+    routePreviewState.restoreView = null;
+    routePreviewState.followZoom = null;
+    routePreviewState.lastCameraUpdateAt = 0;
+
+    if (!map || !restoreView || !restoreView.center || typeof map.setView !== 'function') {
+        return;
+    }
+
+    map.setView(restoreView.center, restoreView.zoom, {
+        animate,
+        duration: animate ? 0.45 : 0
+    });
+}
+
+function focusRoutePreviewCamera(map, latLng, timestamp, force = false) {
+    if (!map || !latLng) {
+        return;
+    }
+
+    const frameTime = Number.isFinite(timestamp) ? timestamp : Date.now();
+    if (!force && frameTime - routePreviewState.lastCameraUpdateAt < ROUTE_PREVIEW_CAMERA_THROTTLE_MS) {
+        return;
+    }
+
+    routePreviewState.lastCameraUpdateAt = frameTime;
+    const followZoom = routePreviewState.followZoom ?? getRoutePreviewFollowZoom(map);
+    routePreviewState.followZoom = followZoom;
+    const currentZoom = typeof map.getZoom === 'function' ? Number(map.getZoom()) : followZoom;
+    const shouldZoom = force || !Number.isFinite(currentZoom) || Math.abs(currentZoom - followZoom) > 0.25;
+
+    if (shouldZoom && typeof map.setView === 'function') {
+        map.setView(latLng, followZoom, {
+            animate: true,
+            duration: 0.35,
+            easeLinearity: 0.25
+        });
+        return;
+    }
+
+    if (typeof map.panTo === 'function') {
+        map.panTo(latLng, {
+            animate: true,
+            duration: 0.22,
+            easeLinearity: 0.25
+        });
+    }
 }
 
 function interpolateRoutePreviewPosition(track, targetDistance) {
@@ -607,7 +689,9 @@ function notifyRoutePreviewUnavailable(message) {
     }
 }
 
-function stopRoutePreview(map) {
+function stopRoutePreview(map, options = {}) {
+    const { restoreView = true, animateRestore = true } = options;
+
     if (routePreviewState.animationFrame !== null && typeof globalThis.cancelAnimationFrame === 'function') {
         globalThis.cancelAnimationFrame(routePreviewState.animationFrame);
     }
@@ -624,6 +708,14 @@ function stopRoutePreview(map) {
         }
     }
 
+    if (restoreView) {
+        restoreRoutePreviewView(map, animateRestore);
+    } else {
+        routePreviewState.restoreView = null;
+        routePreviewState.followZoom = null;
+        routePreviewState.lastCameraUpdateAt = 0;
+    }
+
     resetRoutePreviewButton(routePreviewState.activeButton);
     routePreviewState.marker = null;
     routePreviewState.animationFrame = null;
@@ -634,7 +726,7 @@ function stopRoutePreview(map) {
 function startRoutePreview(map, route, button) {
     const leaflet = globalThis.L;
 
-    stopRoutePreview(map);
+    stopRoutePreview(map, { restoreView: false });
 
     if (!map || !leaflet || typeof leaflet.marker !== 'function') {
         notifyRoutePreviewUnavailable('Route preview is not available on this map.');
@@ -668,11 +760,15 @@ function startRoutePreview(map, route, button) {
     routePreviewState.marker = marker;
     routePreviewState.activeButton = button || null;
     routePreviewState.activeRoutePanelId = route?.routePanelId || null;
+    routePreviewState.restoreView = captureRoutePreviewView(map);
+    routePreviewState.followZoom = getRoutePreviewFollowZoom(map);
+    routePreviewState.lastCameraUpdateAt = 0;
     setRoutePreviewButtonState(button, 'running');
 
     const startedAt = typeof globalThis.performance?.now === 'function'
         ? globalThis.performance.now()
         : Date.now();
+    focusRoutePreviewCamera(map, path[0], startedAt, true);
     const requestFrame = typeof globalThis.requestAnimationFrame === 'function'
         ? globalThis.requestAnimationFrame.bind(globalThis)
         : callback => globalThis.setTimeout(() => callback(Date.now()), 16);
@@ -681,7 +777,9 @@ function startRoutePreview(map, route, button) {
         const elapsed = timestamp - startedAt;
         const progress = Math.max(0, Math.min(1, elapsed / ROUTE_PREVIEW_DURATION_MS));
         const targetDistance = track.totalLength * progress;
-        marker.setLatLng(interpolateRoutePreviewPosition(track, targetDistance));
+        const previewPosition = interpolateRoutePreviewPosition(track, targetDistance);
+        marker.setLatLng(previewPosition);
+        focusRoutePreviewCamera(map, previewPosition, timestamp);
 
         if (progress < 1) {
             routePreviewState.animationFrame = requestFrame(animate);
@@ -690,6 +788,7 @@ function startRoutePreview(map, route, button) {
 
         routePreviewState.animationFrame = null;
         setRoutePreviewButtonState(button, 'complete');
+        restoreRoutePreviewView(map);
     };
 
     routePreviewState.animationFrame = requestFrame(animate);

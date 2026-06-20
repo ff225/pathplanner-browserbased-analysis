@@ -6,14 +6,15 @@ import re
 class UserProfileForm(forms.ModelForm):
     class Meta:
         model = UserProfile
-        fields = ['first_name', 'last_name', 'email', 'profile_picture']
-        
+        fields = ['first_name', 'last_name', 'email', 'profile_picture', 'default_pathology']
+
         labels = {
             'first_name': 'First Name',
             'last_name': 'Last Name',
             'email': 'Email',
             'profile_picture': 'Profile Picture',
             'preferences': 'Preferences',
+            'default_pathology': 'Default pathology',
         }
                 
     def __init__(self, *args, **kwargs):

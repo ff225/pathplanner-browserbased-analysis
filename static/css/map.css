@@ -684,6 +684,25 @@ input[type="range"]::-moz-range-thumb {
     background: var(--mac-accent);
 }
 
+/* Solid background for dropdowns inside the route sidebar so they stay readable
+   over the translucent sidebar surface. */
+.sidebar .dropdown-menu {
+    background: var(--color-surface);
+    border-color: var(--mac-hairline);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}
+
+.sidebar .dropdown-menu .dropdown-item {
+    color: var(--color-text);
+}
+
+.sidebar .dropdown-menu .dropdown-item:hover,
+.sidebar .dropdown-menu .dropdown-item:focus {
+    color: var(--color-on-primary);
+    background: var(--mac-accent);
+}
+
 /* Keep layer dropdown above the user block below it */
 .layer-block {
     position: relative;

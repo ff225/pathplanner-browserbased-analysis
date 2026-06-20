@@ -21,6 +21,9 @@ class MapView(TemplateView):
         user = self.request.user
         if user.is_authenticated:
             context['user_preferences'] = user.userprofile.preferences.all()
+            context['default_pathology'] = user.userprofile.default_pathology
+        else:
+            context['default_pathology'] = 'none'
         context['benchmark_mode'] = self.request.GET.get('benchmark') == '1'
         context['mapbox_access_token'] = settings.MAPBOX_ACCESS_TOKEN
         return context

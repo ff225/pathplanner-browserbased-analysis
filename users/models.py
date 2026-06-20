@@ -1,6 +1,17 @@
 from django.db import models
 from django.contrib.auth.models import User
 
+PATHOLOGY_CHOICES = [
+    ('none', 'No specific condition'),
+    ('respiratory', 'Respiratory condition'),
+    ('cardiac', 'Cardiac condition'),
+    ('arthritis', 'Arthritis or joint pain'),
+    ('mental', 'Mental health'),
+    ('mobility', 'Limited mobility'),
+    ('diabetes', 'Diabetes'),
+]
+
+
 # Class representing an object of type "UserPreferences"
 class UserPreferences(models.Model):
     name = models.CharField(max_length=50, null=True)
@@ -30,6 +41,12 @@ class UserProfile(models.Model):
     email = models.EmailField()
     profile_picture = models.ImageField(upload_to='static/uploaded_profile_pictures/', blank=True, null=True)
     preferences = models.ManyToManyField(UserPreferences, blank=True)
+    default_pathology = models.CharField(
+        max_length=20,
+        choices=PATHOLOGY_CHOICES,
+        default='none',
+        help_text='Default clinical condition pre-selected when planning a route.'
+    )
 
     def __str__(self):
         return self.user.username

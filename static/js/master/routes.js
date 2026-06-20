@@ -16,6 +16,23 @@ const routePreviewState = {
     activeButton: null,
     activeRoutePanelId: null
 };
+const MAPBOX_DIRECTIONS_LANGUAGE = 'it';
+const MAPBOX_DIRECTIONS_ROUTING_OPTIONS = Object.freeze({
+    alternatives: true,
+    steps: true
+});
+const MAPBOX_DIRECTIONS_REQUEST_PARAMETERS = Object.freeze({
+    banner_instructions: true,
+    voice_instructions: true,
+    language: MAPBOX_DIRECTIONS_LANGUAGE
+});
+
+function getMapboxDirectionsRequestParameters(overrides = {}) {
+    return {
+        ...MAPBOX_DIRECTIONS_REQUEST_PARAMETERS,
+        ...overrides
+    };
+}
 
 function getThemeColor(variableName, fallback) {
     try {
@@ -114,6 +131,226 @@ function applyRouteLineStyle(route, isSelected) {
     if (isSelected && routeLine && typeof routeLine.bringToFront === 'function') {
         routeLine.bringToFront();
     }
+}
+
+function formatDistanceMeters(distanceMeters) {
+    const distance = Number.parseFloat(distanceMeters);
+    if (!Number.isFinite(distance)) {
+        return '';
+    }
+
+    if (distance < 1000) {
+        return `${Math.max(0, Math.round(distance))} m`;
+    }
+
+    const formatter = new Intl.NumberFormat('it-IT', {
+        maximumFractionDigits: distance < 10000 ? 1 : 0
+    });
+    return `${formatter.format(distance / 1000)} km`;
+}
+
+function formatDurationSeconds(durationSeconds) {
+    const duration = Number.parseFloat(durationSeconds);
+    if (!Number.isFinite(duration)) {
+        return '';
+    }
+
+    const totalMinutes = Math.max(1, Math.round(duration / 60));
+    if (totalMinutes < 60) {
+        return `${totalMinutes} min`;
+    }
+
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours} h ${minutes} min` : `${hours} h`;
+}
+
+function getRouteDirectionSteps(route) {
+    const routeControl = route?.routingControl;
+    const candidates = [
+        route?.instructions,
+        route?.route?.instructions,
+        routeControl?._selectedRoute?.instructions,
+        routeControl?._routes?.[0]?.instructions
+    ];
+
+    const instructionList = candidates.find(candidate => Array.isArray(candidate) && candidate.length > 0);
+    if (instructionList) {
+        return instructionList;
+    }
+
+    const legs = route?.route?.legs || route?.legs || routeControl?._selectedRoute?.legs || routeControl?._routes?.[0]?.legs;
+    if (Array.isArray(legs)) {
+        return legs.flatMap(leg => Array.isArray(leg?.steps) ? leg.steps : []);
+    }
+
+    return [];
+}
+
+function getInstructionRoad(instruction) {
+    const roadCandidates = [
+        instruction?.road,
+        instruction?.name,
+        instruction?.maneuver?.street_name,
+        instruction?.maneuver?.street_names
+    ];
+
+    for (const candidate of roadCandidates) {
+        if (Array.isArray(candidate) && candidate.length > 0) {
+            const joinedRoad = candidate.filter(Boolean).join(', ').trim();
+            if (joinedRoad) return joinedRoad;
+        }
+        if (typeof candidate === 'string' && candidate.trim()) {
+            return candidate.trim();
+        }
+    }
+
+    return '';
+}
+
+function getInstructionText(instruction) {
+    const road = getInstructionRoad(instruction);
+    const textCandidates = [
+        instruction?.text,
+        instruction?.instruction,
+        instruction?.maneuver?.instruction,
+        instruction?.bannerInstructions?.[0]?.primary?.text,
+        instruction?.voiceInstructions?.[0]?.announcement
+    ];
+    const baseText = textCandidates.find(candidate => typeof candidate === 'string' && candidate.trim())?.trim() || '';
+
+    if (!baseText && road) {
+        return `Continua su ${road}`;
+    }
+
+    if (baseText && road && !baseText.toLocaleLowerCase('it-IT').includes(road.toLocaleLowerCase('it-IT'))) {
+        return `${baseText} su ${road}`;
+    }
+
+    return baseText || 'Prosegui sul percorso';
+}
+
+function getInstructionType(instruction) {
+    return instruction?.type || instruction?.maneuver?.type || instruction?.modifier || instruction?.maneuver?.modifier || 'Continue';
+}
+
+function getInstructionModifier(instruction) {
+    return instruction?.modifier || instruction?.maneuver?.modifier || '';
+}
+
+function getManeuverLabel(instruction) {
+    const type = String(getInstructionType(instruction));
+    const modifier = String(getInstructionModifier(instruction)).toLocaleLowerCase('en-US');
+    const normalizedType = type.replace(/\s+/g, '');
+    const labels = {
+        Head: 'Partenza',
+        Continue: 'Continua',
+        Straight: 'Dritto',
+        SlightRight: 'Leggera destra',
+        Right: 'Destra',
+        SharpRight: 'Destra stretta',
+        SlightLeft: 'Leggera sinistra',
+        Left: 'Sinistra',
+        SharpLeft: 'Sinistra stretta',
+        Uturn: 'Inversione',
+        UTurn: 'Inversione',
+        Roundabout: 'Rotonda',
+        Rotary: 'Rotonda',
+        Merge: 'Immissione',
+        Fork: 'Bivio',
+        OnRamp: 'Rampa',
+        OffRamp: 'Uscita',
+        DestinationReached: 'Arrivo',
+        WaypointReached: 'Tappa'
+    };
+
+    if (labels[normalizedType]) {
+        return labels[normalizedType];
+    }
+
+    if (modifier.includes('right')) return 'Destra';
+    if (modifier.includes('left')) return 'Sinistra';
+    if (modifier.includes('straight')) return 'Dritto';
+
+    return type.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+function getManeuverIconSvg(instruction) {
+    const value = `${getInstructionType(instruction)} ${getInstructionModifier(instruction)}`.toLocaleLowerCase('en-US');
+
+    if (value.includes('destination') || value.includes('arrive')) {
+        return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M6 21V4m0 0h10l-2 4 2 4H6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+    if (value.includes('roundabout') || value.includes('rotary')) {
+        return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M8 16a6 6 0 1 0-1.5-5.9M8 16H4v-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+    if (value.includes('left')) {
+        return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M9 5 4 10l5 5M4 10h9a6 6 0 0 1 6 6v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+    if (value.includes('right')) {
+        return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="m15 5 5 5-5 5M20 10h-9a6 6 0 0 0-6 6v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+    if (value.includes('uturn') || value.includes('u-turn')) {
+        return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M7 7a5 5 0 0 1 10 0v12M7 7l4-4M7 7l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+
+    return '<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M12 19V5m0 0-5 5m5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function renderRouteDirections(route, container) {
+    if (!container) {
+        return;
+    }
+
+    while (container.firstChild) {
+        container.removeChild(container.firstChild);
+    }
+
+    const routeName = route?.routeName || route?.name || 'Percorso selezionato';
+    const heading = L.DomUtil.create('div', 'turn-directions-header', container);
+    const title = L.DomUtil.create('div', 'turn-directions-title', heading);
+    title.textContent = `Indicazioni - ${routeName}`;
+
+    const distanceSummary = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const durationSummary = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
+    const summaryValues = [distanceSummary, durationSummary].filter(Boolean);
+    if (summaryValues.length > 0) {
+        const summary = L.DomUtil.create('div', 'turn-directions-summary', heading);
+        summary.textContent = summaryValues.join(' / ');
+    }
+
+    const steps = getRouteDirectionSteps(route);
+    if (!steps.length) {
+        const emptyState = L.DomUtil.create('div', 'turn-directions-empty', container);
+        emptyState.textContent = 'Indicazioni non disponibili per questo percorso.';
+        return;
+    }
+
+    const list = L.DomUtil.create('ol', 'turn-directions-list', container);
+    steps.forEach((instruction, index) => {
+        const item = L.DomUtil.create('li', 'turn-directions-step', list);
+
+        const icon = L.DomUtil.create('span', 'turn-directions-icon', item);
+        icon.innerHTML = getManeuverIconSvg(instruction);
+
+        const body = L.DomUtil.create('span', 'turn-directions-body', item);
+        const type = L.DomUtil.create('span', 'turn-directions-type', body);
+        type.textContent = `${index + 1}. ${getManeuverLabel(instruction)}`;
+
+        const text = L.DomUtil.create('span', 'turn-directions-text', body);
+        text.textContent = getInstructionText(instruction);
+
+        const distance = L.DomUtil.create('span', 'turn-directions-distance', item);
+        distance.textContent = formatDistanceMeters(instruction?.distance) || '-';
+    });
+}
+
+function updateRouteDirectionsPanel(route, directionsPanel) {
+    if (!directionsPanel) {
+        return;
+    }
+
+    renderRouteDirections(route, directionsPanel);
 }
 
 function parseCoordinateValue(value) {
@@ -716,7 +953,9 @@ function createMapboxRouter(profile = 'walking') {
         geometries: 'geojson',
         steps: true,
         alternatives: true,
-        requestParameters: {}
+        language: MAPBOX_DIRECTIONS_LANGUAGE,
+        routingOptions: { ...MAPBOX_DIRECTIONS_ROUTING_OPTIONS },
+        requestParameters: getMapboxDirectionsRequestParameters()
     });
 }
 
@@ -738,7 +977,10 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
             },
             router: L.Routing.mapbox(MAPBOX_ACCESS_TOKEN, {
                 profile: 'mapbox/' + (additionalInfos.transportMode || 'walking'),
-                requestParameters: {} // Minimal parameters
+                steps: true,
+                language: MAPBOX_DIRECTIONS_LANGUAGE,
+                routingOptions: { ...MAPBOX_DIRECTIONS_ROUTING_OPTIONS },
+                requestParameters: getMapboxDirectionsRequestParameters()
             }),
             createMarker: function() { return null; }
         }).addTo(map);
@@ -1784,6 +2026,8 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                 }
             }
 
+            let directionsPanel = null;
+
             routes.forEach((route, index) => {
                 const routeBaseColor = getRouteBaseColor(route);
                 const selectedColor = getRouteSelectedColor();
@@ -1919,20 +2163,28 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                                         }
                                     }
 
-                                    // Force re-routing and listen for routesfound to style
-	                                    r.routingControl.once('routesfound', function(e) {
-	                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
-	                                        const routeLine = e.routes[0].line || getRouteLineLayer(r);
-	                                        if (routeLine) {
-	                                            routeLine.setStyle(getRouteLineStyle(r, true));
-	                                            if (typeof routeLine.bringToFront === 'function') routeLine.bringToFront();
-	                                        }
-                                            applyRouteLineStyle(r, true);
-	                                    });
-	                                    r.routingControl.route(); // Trigger the routing
+	                                    // Force re-routing and listen for routesfound to style
+		                                    r.routingControl.once('routesfound', function(e) {
+		                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
+                                                const latestRoutePath = e.routes?.[0];
+                                                if (latestRoutePath) {
+                                                    r.route = latestRoutePath;
+                                                    r.length = latestRoutePath.summary ? latestRoutePath.summary.totalDistance : r.length;
+                                                    r.duration = latestRoutePath.summary ? latestRoutePath.summary.totalTime : r.duration;
+                                                    r.instructions = Array.isArray(latestRoutePath.instructions) ? latestRoutePath.instructions : r.instructions;
+                                                }
+		                                        const routeLine = latestRoutePath?.line || getRouteLineLayer(r);
+		                                        if (routeLine) {
+		                                            routeLine.setStyle(getRouteLineStyle(r, true));
+		                                            if (typeof routeLine.bringToFront === 'function') routeLine.bringToFront();
+		                                        }
+	                                            applyRouteLineStyle(r, true);
+                                                updateRouteDirectionsPanel(r, directionsPanel);
+		                                    });
+		                                    r.routingControl.route(); // Trigger the routing
 
-                                        if (r.routingControl._container) {
-                                            $(r.routingControl._container).show();
+	                                        if (r.routingControl._container) {
+	                                            $(r.routingControl._container).show();
                                         }
 	                                    r.removedFromMap = false;
 
@@ -1944,11 +2196,14 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                             } catch (e) {
                                 console.warn(`[setupRouteControlPanel] Error toggling route ${i} visibility/style:`, e);
                             }
-                        }
-                    });
+		                        }
+		                    });
 
-	                    // Update UI for all route items (styling the selected item)
-	                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
+                    const selectedRouteData = routes[selectedIdx];
+                    updateRouteDirectionsPanel(selectedRouteData, directionsPanel);
+
+		                    // Update UI for all route items (styling the selected item)
+		                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
 	                        const isSelected = (i === selectedIdx);
 	                        const currentRouteForStyle = routes[i]; // get current route for styling
                             if (!currentRouteForStyle) return;
@@ -1990,11 +2245,15 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     }
                 });
                 L.DomEvent.on(routeItem, 'mouseover', function() { /* ... hover effects ... */ });
-                L.DomEvent.on(routeItem, 'mouseout', function() { /* ... hover effects ... */ });
-            });
-            return container;
-        }
-    });
+	                L.DomEvent.on(routeItem, 'mouseout', function() { /* ... hover effects ... */ });
+	            });
+                directionsPanel = L.DomUtil.create('section', 'turn-directions-panel', container);
+                directionsPanel.setAttribute('aria-live', 'polite');
+                directionsPanel.setAttribute('aria-label', 'Indicazioni turn-by-turn');
+                renderRouteDirections(routes[initialSelectedIndex], directionsPanel);
+	            return container;
+	        }
+	    });
 
     window.routeControlPanel = new RoutePanel();
     map.addControl(window.routeControlPanel);
@@ -2104,6 +2363,7 @@ async function route(
             createdRoute.route = routePath;
             createdRoute.length = routePath.summary ? routePath.summary.totalDistance : null;
             createdRoute.duration = routePath.summary ? routePath.summary.totalTime : null;
+            createdRoute.instructions = Array.isArray(routePath.instructions) ? routePath.instructions : [];
             if (routePath.coordinates && routePath.coordinates.length > 0) {
                 createdRoute.coordinates = routePath.coordinates;
             }

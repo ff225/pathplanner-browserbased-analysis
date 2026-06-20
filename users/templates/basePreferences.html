@@ -1,0 +1,67 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>{% block title %}{% endblock %}</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <link rel="icon" type="image/png" href="{% static 'img/flavicon.png' %}">
+    <link href="{% static 'css/preferences.css' %}" rel="stylesheet">
+</head>
+<body>
+    <div id="formContainer" class="container">
+        <h2 id="myTitle">{% block h %}{% endblock %}</h2>
+        <form method="POST" enctype="multipart/form-data">
+            {% csrf_token %}
+            <table class="preferences-table">
+                <thead>
+                    <tr>
+                        <th>Preference</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for field in form %}
+                        <tr>
+                            <td><label>{{ field.label }}</label></td>
+                            <td>
+                                {{ field }}
+                                <span id="{{ field.id_for_label }}_value" class="ml-2 slider-value"></span>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% block action %}{% endblock %}
+            {% block href %}{% endblock %}
+        </form>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const comments = {
+                '-1': 'Strongly against',
+                '-0.5': 'Against',
+                '0': 'Neutral',
+                '0.5': 'In favor',
+                '1': 'Strongly in favor'
+            };
+
+            document.querySelectorAll('input[type="range"]').forEach(slider => {
+                const updateValueAndComment = (slider) => {
+                    const value = slider.value;
+                    const comment = comments[value];
+                    const displaySpan = document.getElementById(`${slider.id}_value`);
+                    displaySpan.textContent = `${comment}`;
+                };
+
+                // Update the span initially
+                updateValueAndComment(slider);
+
+                // Add event listener for input event
+                slider.addEventListener('input', (event) => {
+                    updateValueAndComment(event.target);
+                });
+            });
+        });
+    </script>
+</body>
+</html>

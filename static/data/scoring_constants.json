@@ -1,0 +1,73 @@
+{
+  "version": "2026-05-21",
+  "description": "Evidence-tier scoring constants for browser benchmark (calculateAllScores path). Tiers: high=3, medium=2, low=1. See docs/SCORING_EVIDENCE.md.",
+  "weightTiers": { "high": 3, "medium": 2, "low": 1 },
+  "factors": {
+    "temperature": {
+      "comfortC": 22,
+      "bands": {
+        "comfort": { "maxDeviationC": 4, "score": 10 },
+        "moderate": { "maxDeviationC": 8, "score": 7 },
+        "stress": { "score": 4 }
+      },
+      "rationale": "Thermal comfort band ~18–26°C (ASHRAE / WHO heat-health guidance)."
+    },
+    "humidity": {
+      "comfortPct": 50,
+      "bands": {
+        "comfort": { "maxDeviationPct": 15, "score": 10 },
+        "moderate": { "maxDeviationPct": 30, "score": 7 },
+        "stress": { "score": 4 }
+      },
+      "rationale": "Mid-range RH preferred; extremes affect respiratory comfort."
+    },
+    "airQuality": {
+      "scaleMax": 10,
+      "rationale": "Ordinal 1–10 exposure index (10=worst); utility = inverted scale pending PM2.5 dose–response."
+    },
+    "noise": {
+      "scaleMax": 10,
+      "rationale": "Ordinal 1–10 noise index; utility = inverted scale."
+    },
+    "slope": {
+      "sweetSpotBase": 14,
+      "sensitivitySpan": 10,
+      "gradeSpanPct": 10,
+      "minScore": 1,
+      "maxScore": 10,
+      "rationale": "Walkability grade; stricter sweet spot when slopeSensitivity is high (mobility/cardiac)."
+    }
+  },
+  "conditionEnvWeights": {
+    "respiratory": { "airQuality": 3, "humidity": 2, "temperature": 2, "slope": 2, "noise": 1 },
+    "cardiac": { "slope": 3, "temperature": 2, "airQuality": 2, "noise": 2 },
+    "mobility": { "slope": 3, "noise": 1 },
+    "mental": { "noise": 3, "temperature": 1, "slope": 1 },
+    "arthritis": { "slope": 3, "temperature": 2, "humidity": 2 },
+    "diabetes": { "slope": 2, "temperature": 2, "airQuality": 2 }
+  },
+  "conditionPoiEmphasis": {
+    "respiratory": { "poiNature": 2 },
+    "cardiac": { "poiHospital": 2 },
+    "mobility": { "poiHospital": 2 },
+    "mental": { "poiNature": 2, "poiEntertainment": 1, "poiNightlife": 1 },
+    "diabetes": { "poiHospital": 2 }
+  },
+  "poiScaleFactor": 2,
+  "poiScaleRationale": "Normalizes sparse POI counts to 0–10 utility scale (variance alignment, not clinical dose).",
+  "totalScoreBlend": {
+    "default": { "environment": 0.55, "poi": 0.30, "specialized": 0.15 },
+    "respiratory": { "environment": 0.60, "poi": 0.20, "specialized": 0.20 },
+    "cardiac": { "environment": 0.50, "poi": 0.20, "specialized": 0.30 },
+    "mobility": { "environment": 0.50, "poi": 0.25, "specialized": 0.25 },
+    "mental": { "environment": 0.45, "poi": 0.30, "specialized": 0.25 },
+    "arthritis": { "environment": 0.55, "poi": 0.20, "specialized": 0.25 },
+    "diabetes": { "environment": 0.50, "poi": 0.20, "specialized": 0.30 }
+  },
+  "specializedPoi": {
+    "pointsPerHit": 2,
+    "maxCountPerType": 5,
+    "mentalQuietMultiplier": 1.5,
+    "rationale": "Infrastructure POIs (rest, wheelchair, pharmacy); capped to limit outlier leverage."
+  }
+}

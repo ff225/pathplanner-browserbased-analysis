@@ -1,0 +1,48 @@
+.DS_Store
+
+# Python / Django runtime artifacts
+db.sqlite3
+*.sqlite3
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments and dependencies
+venv/
+.venv/
+.venv-*/
+node_modules/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+secret/
+*secret*
+*secrets*
+
+# Local backups and generated files
+*.bak
+*.bak2
+*.bak-*
+*.bak*
+*.backup
+*.backup_*
+*.old
+*.main
+*.end
+logs/
+*.log
+runserver.log
+tmp/
+temp/
+
+# Project-generated outputs / user uploads
+analysis_outputs/
+results_old/
+uploads/
+pathplanner_comparison_browser_*.csv
+benchmark_od_pairs_run*.json
+postprocess_summary.txt

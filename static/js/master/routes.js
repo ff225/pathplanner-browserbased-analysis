@@ -1,0 +1,2144 @@
+import * as LoadingScreen from '../utils/loadingScreen.js';
+import * as GenericUtils from '../utils/generic.js';
+import * as MasterPreferences from '../master/preferences.js'
+import * as MasterPatientCondition from '../master/patientConditions.js';
+import * as Scores from '../master/scores.js';
+import * as Environmental from '../services/environmental.js';
+import * as PointOfInterests from '../services/pointOfInterest.js';
+import * as RoutePlanner from '../services/routePlanner.js';
+
+const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
+
+// Add the createMapboxRouter function
+function createMapboxRouter(profile = 'walking') {
+    return L.Routing.mapbox(MAPBOX_ACCESS_TOKEN, {
+        profile: `mapbox/${profile}`,
+        geometries: 'geojson',
+        steps: true,
+        alternatives: true,
+        requestParameters: {}
+    });
+}
+
+// Moved displayFallbackRoute to module scope
+function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon) {
+    console.warn("No optimized routes found or primary routing failed, displaying direct route with Mapbox as fallback.");
+    try {
+        const startLatLng = L.latLng(startLat || 44.6471, startLon || 10.6292);
+        const endLatLng = L.latLng(endLat || 44.6499, endLon || 10.6368);
+
+        var fallbackControl = L.Routing.control({
+            waypoints: [startLatLng, endLatLng],
+            routeWhileDragging: false,
+            fitSelectedRoutes: true,
+            showAlternatives: false, // Keep it simple for fallback
+            lineOptions: {
+                styles: [{ color: '#0073d4', opacity: 0.8, weight: 5 }],
+                missingRouteTolerance: 100
+            },
+            router: L.Routing.mapbox(MAPBOX_ACCESS_TOKEN, {
+                profile: 'mapbox/' + (additionalInfos.transportMode || 'walking'),
+                requestParameters: {} // Minimal parameters
+            }),
+            createMarker: function() { return null; }
+        }).addTo(map);
+
+        fallbackControl.on('routingerror', function(e) {
+            console.error("Mapbox fallback route also failed:", e);
+            toastr.error("Could not calculate any route between these points.");
+        });
+
+        currentRouting.routingControls.push(fallbackControl);
+        toastr.info("Showing direct route as fallback.");
+    } catch (error) {
+        console.error("Error creating Mapbox fallback route:", error);
+        toastr.error("Unable to display any fallback route.");
+    }
+}
+
+// Add the analytics helper function at the top of the file
+function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
+    console.log(`[collectRouteAnalyticsData] Processing route: ${route.routeName}, condition: ${condition.name}`);
+    
+    // Format timestamp
+    const now = new Date();
+    const timestamp = now.toISOString();
+    
+    // Use custom route name if available
+    let routeName = 'Default Route';
+    if (route.name) {
+        routeName = route.name;
+    } else if (route.routeName) {
+        routeName = route.routeName;
+    } else if (routeIndex === 0) {
+        routeName = 'Best Route';
+    } else {
+        routeName = `Alternative Route ${routeIndex}`;
+    }
+    
+    // Basic route data
+    const routeData = {
+        timestamp: timestamp,
+        city: "Reggio Emilia",
+        path_type: routeName,
+        start_lat: route.startPoint?.lat || "",
+        start_lon: route.startPoint?.lon || "",
+        end_lat: route.endPoint?.lat || "",
+        end_lon: route.endPoint?.lon || "",
+        length_shortest_path: route.shortestLength || route.length,
+        length_this_path: route.length || 0,
+        multiplier_factor: ((route.length || 0) / (route.shortestLength || route.length)).toFixed(2),
+        path_score: route.score ? route.score.toFixed(1) : "0",
+        routing_mode: "preference",
+        patient_condition: condition.name || "none",
+        preference_label: preferences.label || "default",
+        transport_mode: route.transportMode || "walking",
+        data_source: "real_api", // Will be updated based on actual data
+        real_data_percent: "0" // Will be updated based on actual data
+    };
+    
+    // Environmental data processing
+    if (route.environmentDataList && route.environmentDataList.length > 0) {
+        console.log(`[collectRouteAnalyticsData] Found ${route.environmentDataList.length} environmental data points for route`);
+        
+        // Filter to only use real API data points
+        const realDataPoints = route.environmentDataList.filter(point => 
+            !point.isDefault && !point.isSynthetic && !point.isEnhanced
+        );
+        
+        console.log(`[collectRouteAnalyticsData] Found ${realDataPoints.length}/${route.environmentDataList.length} real API data points`);
+        
+        // Calculate real data percentage
+        const realDataPercent = route.environmentDataList.length > 0 ? 
+            (realDataPoints.length / route.environmentDataList.length) * 100 : 0;
+        
+        routeData.real_data_percent = realDataPercent.toFixed(1);
+        routeData.data_source = realDataPercent >= 50 ? "real_api" : "mixed_data";
+        routeData.env_data_count = route.environmentDataList.length;
+        routeData.real_data_count = realDataPoints.length;
+        
+        // Determine which data set to use (real only or all)
+        const dataToUse = realDataPoints.length >= 3 ? realDataPoints : route.environmentDataList;
+        console.log(`[collectRouteAnalyticsData] Using ${dataToUse === realDataPoints ? 'real-only' : 'mixed'} data for statistics (${dataToUse.length} points)`);
+        
+        // Extract environmental statistics - Temperature
+        const temperatureValues = dataToUse
+            .filter(point => point.temperature !== null && point.temperature !== undefined)
+            .map(point => point.temperature);
+            
+        if (temperatureValues.length > 0) {
+            const sum = temperatureValues.reduce((total, val) => total + val, 0);
+            routeData.temperature = (sum / temperatureValues.length).toFixed(1);
+            routeData.temperature_min = Math.min(...temperatureValues).toFixed(1);
+            routeData.temperature_max = Math.max(...temperatureValues).toFixed(1);
+            routeData.temperature_points = temperatureValues.length;
+        } else {
+            routeData.temperature = "N/A";
+            routeData.temperature_min = "N/A";
+            routeData.temperature_max = "N/A";
+            routeData.temperature_points = 0;
+        }
+        
+        // Extract environmental statistics - Humidity
+        const humidityValues = dataToUse
+            .filter(point => point.humidity !== null && point.humidity !== undefined)
+            .map(point => point.humidity);
+            
+        if (humidityValues.length > 0) {
+            const sum = humidityValues.reduce((total, val) => total + val, 0);
+            routeData.humidity = (sum / humidityValues.length).toFixed(1);
+            routeData.humidity_min = Math.min(...humidityValues).toFixed(1);
+            routeData.humidity_max = Math.max(...humidityValues).toFixed(1);
+        } else {
+            routeData.humidity = "N/A";
+            routeData.humidity_min = "N/A";
+            routeData.humidity_max = "N/A";
+        }
+        
+        // Extract environmental statistics - Air Quality
+        const airQualityValues = dataToUse
+            .filter(point => point.airQuality !== null && point.airQuality !== undefined)
+            .map(point => point.airQuality);
+            
+        if (airQualityValues.length > 0) {
+            const sum = airQualityValues.reduce((total, val) => total + val, 0);
+            routeData.air_quality = (sum / airQualityValues.length).toFixed(1);
+            routeData.air_quality_min = Math.min(...airQualityValues).toFixed(1);
+            routeData.air_quality_max = Math.max(...airQualityValues).toFixed(1);
+            routeData.air_quality_points = airQualityValues.length;
+        } else {
+            routeData.air_quality = "N/A";
+            routeData.air_quality_min = "N/A";
+            routeData.air_quality_max = "N/A";
+            routeData.air_quality_points = 0;
+        }
+        
+        // Extract environmental statistics - Weather
+        const weatherValues = dataToUse
+            .filter(point => point.weather)
+            .map(point => point.weather);
+            
+        if (weatherValues.length > 0) {
+            // Find most common weather condition
+            const weatherCounts = {};
+            weatherValues.forEach(weather => {
+                weatherCounts[weather] = (weatherCounts[weather] || 0) + 1;
+            });
+            
+            let mostFrequent = weatherValues[0];
+            let maxCount = 0;
+            
+            for (const weather in weatherCounts) {
+                if (weatherCounts[weather] > maxCount) {
+                    mostFrequent = weather;
+                    maxCount = weatherCounts[weather];
+                }
+            }
+            
+            routeData.weather_condition = mostFrequent;
+        } else {
+            routeData.weather_condition = "N/A";
+        }
+        
+        // Extract environmental statistics - Slope
+        const slopeValues = dataToUse
+            .filter(point => point.slope !== null && point.slope !== undefined)
+            .map(point => Math.abs(point.slope));
+            
+        if (slopeValues.length > 0) {
+            const sum = slopeValues.reduce((total, val) => total + val, 0);
+            routeData.avg_slope = (sum / slopeValues.length).toFixed(2);
+            routeData.max_slope = Math.max(...slopeValues).toFixed(2);
+            routeData.slope_points = slopeValues.length;
+        } else {
+            routeData.avg_slope = "N/A";
+            routeData.max_slope = "N/A";
+            routeData.slope_points = 0;
+        }
+        
+        // Extract environmental statistics - Noise
+        const noiseValues = dataToUse
+            .filter(point => point.noise !== null && point.noise !== undefined)
+            .map(point => point.noise);
+            
+        if (noiseValues.length > 0) {
+            const sum = noiseValues.reduce((total, val) => total + val, 0);
+            routeData.avg_noise = (sum / noiseValues.length).toFixed(1);
+            routeData.max_noise = Math.max(...noiseValues).toFixed(1);
+        } else {
+            routeData.avg_noise = "N/A";
+            routeData.max_noise = "N/A";
+        }
+        
+        // Environmental scores directly from route object - Use raw scores without scaling
+        routeData.env_score = route.environmentScore ? route.environmentScore.toFixed(1) : "N/A";
+        
+        // Add environmental data stats
+        routeData.env_data_quality = (route.environmentDataList.length / (route.coordinates?.length || 1)).toFixed(2);
+        
+        // Log detailed summary
+        console.log(`[collectRouteAnalyticsData] Environmental data summary for ${routeName}:`);
+        console.log(`- Temperature: ${routeData.temperature} (${routeData.temperature_min}-${routeData.temperature_max})`);
+        console.log(`- Air Quality: ${routeData.air_quality} (${routeData.air_quality_min}-${routeData.air_quality_max})`);
+        console.log(`- Slope: ${routeData.avg_slope} (max: ${routeData.max_slope})`);
+        console.log(`- Real Data: ${routeData.real_data_percent}% (${realDataPoints.length}/${route.environmentDataList.length})`);
+        
+    } else {
+        // No environmental data found - mark clearly as missing data
+        console.warn(`[collectRouteAnalyticsData] No environmentDataList found for ${routeName}`);
+        routeData.temperature = "MISSING";
+        routeData.humidity = "MISSING";
+        routeData.air_quality = "MISSING";
+        routeData.weather_condition = "MISSING";
+        routeData.avg_slope = "MISSING";
+        routeData.max_slope = "MISSING";
+        routeData.avg_noise = "MISSING";
+        routeData.max_noise = "MISSING";
+        routeData.env_score = route.environmentScore ? route.environmentScore.toFixed(1) : "MISSING";
+        routeData.env_data_quality = "0.00";
+        routeData.data_source = "missing";
+        routeData.real_data_percent = "0.0";
+    }
+    
+    // POI counts
+    if (route.poiCounts) {
+        routeData.num_poi_nature = route.poiCounts.natureCount || 0;
+        routeData.num_poi_entertainment = route.poiCounts.entertainmentCount || 0;
+        routeData.num_poi_nightlife = route.poiCounts.nightlifeCount || 0;
+        routeData.num_poi_tourism = route.poiCounts.tourismCount || 0;
+        routeData.num_poi_hospital = route.poiCounts.hospitalCount || 0;
+        
+        // Specialized POIs for explainability
+        routeData.rest_areas = route.poiCounts.restingAreaCount || 0;
+        routeData.park_benches = route.poiCounts.parkBenchCount || 0;
+        routeData.pharmacies = route.poiCounts.pharmacyCount || 0;
+        routeData.wheelchair_access = route.poiCounts.wheelchairAccessCount || 0;
+        routeData.flat_pathways = route.poiCounts.flatPathwayCount || 0;
+        routeData.public_toilets = route.poiCounts.publicToiletCount || 0;
+        routeData.quiet_areas = route.poiCounts.quietAreaCount || 0;
+        routeData.water_fountains = route.poiCounts.waterFountainCount || 0;
+        routeData.cafes = route.poiCounts.cafeCount || 0;
+    }
+    
+    // Patient sensitivity values
+    if (condition.isPatientMode && condition.name !== "default") {
+        routeData.temperature_sensitivity = condition.temperatureSensitivity || 0;
+        routeData.humidity_sensitivity = condition.humiditySensitivity || 0;
+        routeData.air_quality_sensitivity = condition.airQualitySensitivity || 0;
+        routeData.slope_sensitivity = condition.slopeSensitivity || 0;
+        routeData.noise_sensitivity = condition.noiseSensitivity || 0;
+    }
+    
+    // POI weights
+    routeData.poi_nature_weight = preferences.nature || 0;
+    routeData.poi_entertainment_weight = preferences.entertainment || 0;
+    routeData.poi_nightlife_weight = preferences.nightlife || 0;
+    routeData.poi_tourism_weight = preferences.tourism || 0;
+    routeData.poi_hospital_weight = preferences.hospital || 0;
+    
+    // Score breakdown - Use raw scores without scaling
+    routeData.total_score = route.score ? route.score.toFixed(1) : "0";
+    routeData.env_score = route.environmentScore ? route.environmentScore.toFixed(1) : "0";
+    routeData.poi_score = route.poiScore ? route.poiScore.toFixed(1) : "0";
+    routeData.specialized_poi_score = route.specializedPoiScore ? route.specializedPoiScore.toFixed(1) : "0";
+    
+    console.log(`[collectRouteAnalyticsData] Generated data for route: ${routeName}, score: ${routeData.total_score}, real data: ${routeData.real_data_percent}%`);
+    return routeData;
+}
+
+// Modify the generateConditionSpecificRoutes function
+async function generateConditionSpecificRoutes(condition, waypoints, transportMode) {
+    try {
+        console.log(`[generateConditionSpecificRoutes] Environmental A* + Mapbox for ${condition.name}`);
+        
+        const map = window.map || null;
+        if (!map) {
+            console.warn("[generateConditionSpecificRoutes] No map — cannot run grid A*");
+            return generateDefaultRoutePatterns(condition, waypoints, transportMode);
+        }
+        
+        const optimizedRoutes = await RoutePlanner.generateOptimizedRoutes(
+            waypoints.start,
+            waypoints.end,
+            map,
+            condition,
+            transportMode,
+            condition.isPatientMode ? 3 : 2,
+            { preferAStar: true }
+        );
+        
+        console.log(`[generateConditionSpecificRoutes] ${optimizedRoutes.length} route(s) for ${condition.name}`);
+        optimizedRoutes.forEach((route, index) => {
+            console.log(`  Route ${index + 1}: ${route.name} [${route.routingEngine || 'unknown'}], score: ${route.environmentalScore}`);
+        });
+        
+        if (optimizedRoutes.length === 0) {
+            console.warn("[generateConditionSpecificRoutes] No routes from RoutePlanner");
+            return generateDefaultRoutePatterns(condition, waypoints, transportMode);
+        }
+        
+        // Convert to the format expected by the route function
+        const routePatterns = RoutePlanner.convertToRoutesFormat(optimizedRoutes);
+        
+        console.log(`[generateConditionSpecificRoutes] Generated ${routePatterns.length} total routes for ${condition.name}`);
+        return routePatterns;
+        
+    } catch (error) {
+        console.error("[generateConditionSpecificRoutes] Error generating routes with A*:", error);
+        // Fall back to the original implementation if A* fails
+        return generateDefaultRoutePatterns(condition, waypoints, transportMode);
+    }
+}
+
+/**
+ * Generate waypoints specifically tailored for each patient condition
+ * @param {Object} condition - Patient condition object
+ * @param {Object} waypoints - Start and end waypoints
+ * @returns {Array} Array of waypoint pattern objects
+ */
+function generateConditionWaypoints(condition, waypoints) {
+    // Calculate base values for alternative routes
+    const startLat = parseFloat(waypoints.start.lat);
+    const startLon = parseFloat(waypoints.start.lon);
+    const endLat = parseFloat(waypoints.end.lat);
+    const endLon = parseFloat(waypoints.end.lon);
+    
+    // Calculate midpoint for alternative routes
+    const midLat = (startLat + endLat) / 2;
+    const midLon = (startLon + endLon) / 2;
+    
+    // Calculate distance between points to determine reasonable offsets
+    const latDiff = Math.abs(startLat - endLat);
+    const lonDiff = Math.abs(startLon - endLon);
+    
+    // Calculate offsets in different directions (larger than default for more distinct routes)
+    const offset = Math.max(latDiff, lonDiff) * 0.5; // 50% of the total distance
+    
+    console.log(`[generateConditionWaypoints] Generating waypoints for ${condition.name} condition`);
+    console.log(`  Start: ${startLat},${startLon} | End: ${endLat},${endLon}`);
+    console.log(`  Midpoint: ${midLat},${midLon} | Offset: ${offset}`);
+    
+    const waypointPatterns = [];
+    
+    // Generate different patterns based on patient condition
+    switch(condition.name) {
+        case "respiratory":
+            // For respiratory conditions, prioritize:
+            // 1. Clean air (parks, away from main roads)
+            // 2. Low pollution areas
+            // 3. Flat terrain (to minimize exertion)
+            
+            // Route 1: Green route through parks (north-east path)
+            waypointPatterns.push({
+                name: "Green Air Route",
+                description: "Route through parks and areas with better air quality",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.7, lon: midLon + offset * 0.7 }, // Northeast path through parks
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Low traffic route (skirting around main roads)
+            waypointPatterns.push({
+                name: "Low Pollution Route",
+                description: "Route that avoids high traffic and pollution areas",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.3, lon: midLon + offset * 0.9 }, // Southeast path away from city center
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Flat terrain route
+            waypointPatterns.push({
+                name: "Low Exertion Route",
+                description: "Route with minimal elevation changes to reduce breathing effort",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.2, lon: midLon - offset * 0.8 }, // Northwest path on flat ground
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        case "cardiac":
+            // For cardiac conditions, prioritize:
+            // 1. Flat terrain (avoid hills)
+            // 2. Emergency access (near medical facilities)
+            // 3. Rest opportunities
+            
+            // Route 1: Flat terrain route
+            waypointPatterns.push({
+                name: "Heart-Friendly Flat Route",
+                description: "Route with minimal elevation changes to reduce cardiac strain",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat, lon: midLon + offset * 0.9 }, // Eastern path (typically flatter)
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Medical access route
+            waypointPatterns.push({
+                name: "Medical Access Route",
+                description: "Route passing near hospitals and medical facilities",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.8, lon: midLon - offset * 0.2 }, // Southwest path near hospital district
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Rest stops route
+            waypointPatterns.push({
+                name: "Rest Areas Route",
+                description: "Route with frequent benches and rest opportunities",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.6, lon: midLon - offset * 0.5 }, // Northwest path through parks with benches
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        case "mobility":
+            // For mobility conditions, prioritize:
+            // 1. Flat terrain (no slopes)
+            // 2. Smooth surfaces (well-maintained paths)
+            // 3. Accessibility features (curb cuts, wide paths)
+            
+            // Route 1: Wheelchair accessible route
+            waypointPatterns.push({
+                name: "Wheelchair Accessible Route",
+                description: "Route optimized for wheelchair access and mobility devices",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.1, lon: midLon - offset * 0.7 }, // Western path with accessibility features
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Smooth surface route
+            waypointPatterns.push({
+                name: "Smooth Surface Route",
+                description: "Route with well-maintained, even surfaces",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.5, lon: midLon + offset * 0.5 }, // Southeast path on main sidewalks
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Flat terrain route
+            waypointPatterns.push({
+                name: "Zero-Slope Route",
+                description: "Route that avoids any inclines or slopes",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat, lon: midLon + offset * 0.8 }, // Eastern path on flat ground
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        case "mental":
+            // For mental health conditions, prioritize:
+            // 1. Quiet areas (low noise)
+            // 2. Green spaces (parks, nature)
+            // 3. Low sensory load (away from crowds)
+            
+            // Route 1: Nature therapy route
+            waypointPatterns.push({
+                name: "Nature Therapy Route",
+                description: "Route through parks and green spaces for mental wellbeing",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.7, lon: midLon + offset * 0.4 }, // Northeast path through major parks
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Quiet zone route
+            waypointPatterns.push({
+                name: "Quiet Zone Route",
+                description: "Route through low-noise areas for reduced stress",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.6, lon: midLon + offset * 0.6 }, // Southeast path through residential areas
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Low stimulation route
+            waypointPatterns.push({
+                name: "Low Stimulation Route",
+                description: "Route with minimal sensory overload and crowds",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.3, lon: midLon - offset * 0.9 }, // Northwest path away from busy areas
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        case "arthritis":
+            // For arthritis conditions, prioritize:
+            // 1. Smooth surfaces (well-maintained paths)
+            // 2. Flat terrain (no slopes)
+            // 3. Rest opportunities (benches)
+            
+            // Route 1: Joint-friendly surface route
+            waypointPatterns.push({
+                name: "Joint-Friendly Surface Route",
+                description: "Route with smooth surfaces that minimize joint stress",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.4, lon: midLon - offset * 0.8 }, // Southwest path on smooth surfaces
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Flat terrain route
+            waypointPatterns.push({
+                name: "Zero-Incline Route",
+                description: "Route with no inclines to reduce joint stress",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat, lon: midLon + offset * 0.7 }, // Eastern path on flat ground
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Rest areas route
+            waypointPatterns.push({
+                name: "Rest Spot Route",
+                description: "Route with frequent benches and rest opportunities",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.8, lon: midLon + offset * 0.3 }, // Northeast path with rest areas
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        case "diabetes":
+            // For diabetes conditions, prioritize:
+            // 1. Moderate exercise (some gentle slopes)
+            // 2. Access to services (pharmacies, food)
+            // 3. Rest opportunities
+            
+            // Route 1: Moderate exercise route
+            waypointPatterns.push({
+                name: "Moderate Exercise Route",
+                description: "Route with gentle inclines for appropriate exercise",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.6, lon: midLon + offset * 0.6 }, // Northeast path with gentle slopes
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 2: Services access route
+            waypointPatterns.push({
+                name: "Services Access Route",
+                description: "Route passing near pharmacies and food services",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat - offset * 0.7, lon: midLon + offset * 0.3 }, // Southeast path through commercial areas
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            // Route 3: Rest and recovery route
+            waypointPatterns.push({
+                name: "Rest and Recovery Route",
+                description: "Route with places to rest and access water/food",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.2, lon: midLon - offset * 0.6 }, // Northwest path with amenities
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            break;
+            
+        default:
+            // Default route patterns for unknown conditions
+            waypointPatterns.push({
+                name: "Alternative Route A",
+                description: "Northern alternative path",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat + offset * 0.7, lon: midLon }, // Northern path
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+            
+            waypointPatterns.push({
+                name: "Alternative Route B",
+                description: "Eastern alternative path",
+                waypoints: [
+                    { lat: startLat, lon: startLon },
+                    { lat: midLat, lon: midLon + offset * 0.7 }, // Eastern path
+                    { lat: endLat, lon: endLon }
+                ]
+            });
+    }
+    
+    // Log the generated waypoint patterns
+    console.log(`[generateConditionWaypoints] Generated ${waypointPatterns.length} waypoint patterns for ${condition.name}`);
+    waypointPatterns.forEach((pattern, index) => {
+        console.log(`  Pattern ${index+1}: ${pattern.name} - ${pattern.description}`);
+    });
+    
+    return waypointPatterns;
+}
+
+// Keep the original implementation as a fallback
+function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
+        // Generate different route patterns based on patient condition
+        const routePatterns = [];
+        
+        // Add direct route for all conditions
+        routePatterns.push({
+            name: "Direct Route",
+            description: "Shortest path between points",
+            waypoints: [
+                { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                { lat: waypoints.end.lat, lon: waypoints.end.lon }
+            ]
+        });
+        
+        if (condition.isPatientMode) {
+            // Calculate midpoint for alternative routes
+            const midLat = (parseFloat(waypoints.start.lat) + parseFloat(waypoints.end.lat)) / 2;
+            const midLon = (parseFloat(waypoints.start.lon) + parseFloat(waypoints.end.lon)) / 2;
+            
+            // Calculate distance between points to determine reasonable offsets
+            const latDiff = Math.abs(parseFloat(waypoints.start.lat) - parseFloat(waypoints.end.lat));
+            const lonDiff = Math.abs(parseFloat(waypoints.start.lon) - parseFloat(waypoints.end.lon));
+            const offset = Math.max(latDiff, lonDiff) * 0.3; // 30% of the total distance
+            
+            switch(condition.name) {
+                case "respiratory":
+                    // Add routes that prioritize green areas and low traffic
+                    routePatterns.push({
+                        name: "Low Pollution Route",
+                        description: "Route that avoids highly polluted areas",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat + offset, lon: midLon }, // Northern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Green Route",
+                        description: "Route through park areas with better air quality",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat, lon: midLon + offset }, // Eastern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                case "cardiac":
+                    // Add routes that are flat and near medical facilities
+                    routePatterns.push({
+                        name: "Flat Terrain Route",
+                        description: "Route that minimizes elevation changes",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat, lon: midLon + offset }, // Eastern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Medical Access Route",
+                        description: "Route near medical facilities",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat - offset, lon: midLon }, // Southern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                case "mental":
+                    // Add routes that are quiet and have nature
+                    routePatterns.push({
+                        name: "Quiet Route",
+                        description: "Route that minimizes noise exposure",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat + offset, lon: midLon + offset }, // Northeast path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Nature Route",
+                        description: "Route with natural elements for relaxation",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat - offset, lon: midLon + offset }, // Southeast path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                case "mobility":
+                    // Add routes with accessible paths
+                    routePatterns.push({
+                        name: "Accessible Route",
+                        description: "Route optimized for wheelchair access",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat - offset, lon: midLon - offset }, // Southwest path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Flat Path Route",
+                        description: "Route with minimal slopes",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat, lon: midLon - offset }, // Western path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                case "arthritis":
+                    // Add routes that are flat and have rest areas
+                    routePatterns.push({
+                        name: "Joint-Friendly Route",
+                        description: "Route with smooth surfaces and minimal inclines",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat, lon: midLon - offset }, // Western path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Rest Area Route",
+                        description: "Route with benches and rest opportunities",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat + offset, lon: midLon - offset }, // Northwest path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                case "diabetes":
+                    // Add routes with medical facilities and moderate exercise
+                    routePatterns.push({
+                        name: "Health Services Route",
+                        description: "Route passing near pharmacies and health services",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat - offset, lon: midLon }, // Southern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Moderate Exercise Route",
+                        description: "Route with appropriate inclines for safe exercise",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat + offset, lon: midLon + offset }, // Northeast path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    break;
+                    
+                default:
+                    // Default route patterns
+                    routePatterns.push({
+                        name: "Alternative Route A",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat + offset, lon: midLon }, // Northern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+                    
+                    routePatterns.push({
+                        name: "Alternative Route B",
+                        waypoints: [
+                            { lat: waypoints.start.lat, lon: waypoints.start.lon },
+                            { lat: midLat, lon: midLon + offset }, // Eastern path
+                            { lat: waypoints.end.lat, lon: waypoints.end.lon }
+                        ]
+                    });
+            }
+        }
+        
+        return routePatterns;
+}
+
+// Move the setupRouteControlPanel function definition to module level
+// so it can be used by both route() and routeWithPrecalculatedRoutes()
+
+/**
+ * Set up the route control panel UI for selecting different routes
+ * @param {Object} map - Leaflet map object
+ * @param {Array} routes - Array of route objects
+ * @param {Object} currentRouting - Current routing state
+ */
+function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondition, currentPreferences) {
+    console.log(`[setupRouteControlPanel] Setting up control panel with ${routes.length} routes. Condition: ${currentPatientCondition ? currentPatientCondition.name : 'N/A'}, Prefs: ${currentPreferences ? currentPreferences.label : 'N/A'}`);
+
+    // Remove existing panel if it exists
+    if (window.routeControlPanel) {
+        try {
+            map.removeControl(window.routeControlPanel);
+            window.routeControlPanel = null;
+        } catch (e) { console.warn("[setupRouteControlPanel] Error removing existing panel:", e); }
+    }
+
+    // Aggressively remove all existing routing controls from the map first
+    // This ensures a clean slate before adding the new ones if routes were from a *previous* search.
+    if (currentRouting.routingControls && currentRouting.routingControls.length > 0) {
+        currentRouting.routingControls.forEach(control => {
+            if (control && map.hasLayer(control)) {
+                try {
+                    map.removeControl(control);
+                    console.log(`[setupRouteControlPanel] Aggressively removed old control.`);
+                } catch (e) {
+                    console.warn(`[setupRouteControlPanel] Error aggressively removing old control:`, e);
+                }
+            }
+        });
+    }
+    currentRouting.routingControls = []; // Reset for the new set of routes
+
+    // Ensure all routes have valid scores
+    routes.forEach(route => {
+        if (route.score === undefined || route.score === null) route.score = 5.0;
+        if (route.environmentScore === undefined || route.environmentScore === null) route.environmentScore = 5.0;
+        if (route.poiScore === undefined || route.poiScore === null) route.poiScore = 5.0;
+        console.log(`[setupRouteControlPanel] Route: ${route.routeName || route.name || 'Unnamed'}, Raw Score: ${route.score ? route.score.toFixed(1) : 'N/A'}, EnvScore: ${route.environmentScore ? route.environmentScore.toFixed(1) : 'N/A'}, POI: ${route.poiScore ? route.poiScore.toFixed(1) : 'N/A'}`);
+    });
+
+    const optimizedRouteIndex = routes.findIndex(route => !route.isDirectRoute);
+    const initialSelectedIndex = optimizedRouteIndex !== -1 ? optimizedRouteIndex : 0;
+
+    // Pre-process to add only the selected route's control to the map initially
+    routes.forEach((route, index) => {
+        if (route.routingControl) {
+            try {
+                const routeLine = route.routingControl._routes && route.routingControl._routes.length > 0 ? route.routingControl._routes[0].line : null;
+                if (index === initialSelectedIndex) {
+                    console.log(`[setupRouteControlPanel] Initially ADDING & SHOWING route ${index}: ${route.routeName || route.name}`);
+                    if (!map.hasLayer(route.routingControl)) {
+                        route.routingControl.addTo(map);
+                        currentRouting.routingControls.push(route.routingControl); // Add to managed list
+                    }
+                    $(route.routingControl._container).show();
+                    if (routeLine) {
+                        if (!map.hasLayer(routeLine)) map.addLayer(routeLine);
+                        routeLine.setStyle({
+                            color: route.isDirectRoute ? '#3498db' : '#2ecc71',
+                            weight: 6,
+                            opacity: 0.9
+                        });
+                        routeLine.bringToFront();
+                    }
+                    route.removedFromMap = false;
+                } else {
+                    // For non-selected routes, ensure their controls are NOT on the map
+                    // and containers are hidden. They will be added if selected later.
+                    console.log(`[setupRouteControlPanel] Initially ensuring route ${index} (${route.routeName || route.name}) is HIDDEN and REMOVED`);
+                    if (map.hasLayer(route.routingControl)) {
+                        map.removeControl(route.routingControl);
+                    }
+                    $(route.routingControl._container).hide();
+                    if (routeLine && map.hasLayer(routeLine)) {
+                        map.removeLayer(routeLine);
+                    }
+                    route.removedFromMap = true;
+                }
+            } catch (e) {
+                console.warn(`[setupRouteControlPanel] Error setting initial visibility for route ${index} (${route.routeName || route.name}):`, e);
+            }
+        }
+    });
+
+    const RoutePanel = L.Control.extend({
+        options: { position: 'topright' },
+        onAdd: function () {
+            const container = L.DomUtil.create('div', 'route-selector');
+            container.style.backgroundColor = 'white';
+            container.style.padding = '10px';
+            container.style.borderRadius = '5px';
+            container.style.boxShadow = '0 0 10px rgba(0,0,0,0.2)';
+            container.style.zIndex = '1000';
+            container.style.maxHeight = '400px';
+            container.style.overflowY = 'auto';
+            container.style.minWidth = '280px';
+            
+            const title = L.DomUtil.create('div', 'title', container);
+            title.innerHTML = '<strong>Route Comparison</strong>';
+            title.style.marginBottom = '10px';
+            title.style.fontSize = '16px';
+            title.style.borderBottom = '1px solid #eee';
+            title.style.paddingBottom = '5px';
+            
+            const instructions = L.DomUtil.create('div', 'instructions', container);
+            instructions.innerHTML = 'Compare direct vs. condition-optimized route:';
+            instructions.style.marginBottom = '12px';
+            instructions.style.fontSize = '13px';
+            instructions.style.color = '#666';
+            
+            if (routes.length === 2) {
+                const comparisonHeader = L.DomUtil.create('div', 'comparison-header', container);
+                comparisonHeader.style.display = 'flex';
+                comparisonHeader.style.justifyContent = 'space-between';
+                comparisonHeader.style.padding = '5px 10px';
+                comparisonHeader.style.backgroundColor = '#f8f9fa';
+                comparisonHeader.style.borderRadius = '4px';
+                comparisonHeader.style.marginBottom = '10px';
+                comparisonHeader.style.fontSize = '12px';
+                comparisonHeader.style.fontWeight = 'bold';
+
+                const directRoute = routes.find(r => r.isDirectRoute);
+                const optimizedRoute = routes.find(r => !r.isDirectRoute);
+                
+                if (directRoute && optimizedRoute && directRoute.length && optimizedRoute.length) {
+                    const directLength = (directRoute.length / 1000).toFixed(2);
+                    const optimizedLength = (optimizedRoute.length / 1000).toFixed(2);
+                    const lengthDiff = ((optimizedRoute.length - directRoute.length) / directRoute.length * 100).toFixed(0);
+                    const directScore = directRoute.score || 0;
+                    const optimizedScore = optimizedRoute.score || 0;
+                    const scoreDiff = ((optimizedScore - directScore) / Math.max(1, directScore) * 100).toFixed(0);
+                    
+                    const comparisonText = L.DomUtil.create('div', 'comparison-text', container);
+                    comparisonText.style.fontSize = '12px';
+                    comparisonText.style.marginBottom = '15px';
+                    comparisonText.style.padding = '5px';
+                    comparisonText.style.backgroundColor = '#f0f8ff';
+                    comparisonText.style.borderRadius = '4px';
+                    comparisonText.style.borderLeft = '3px solid #3498db';
+
+                    const isLonger = optimizedRoute.length > directRoute.length;
+                    const isBetterScore = optimizedScore > directScore;
+                    
+                    comparisonText.innerHTML = `
+                        <div style="font-weight: bold; margin-bottom: 3px;">Route Comparison:</div>
+                        <div>The optimized route is ${isLonger ? `${lengthDiff}% longer` : `${Math.abs(lengthDiff)}% shorter`} (${optimizedLength} vs ${directLength} km)</div>
+                        <div>Health score is ${isBetterScore ? `${scoreDiff}% better` : `${Math.abs(scoreDiff)}% worse`} (${optimizedScore.toFixed(1)} vs ${directScore.toFixed(1)})</div>
+                    `;
+                }
+            }
+
+            routes.forEach((route, index) => {
+                const routeItem = L.DomUtil.create('div', 'route-item', container);
+                routeItem.style.marginBottom = '10px';
+                routeItem.style.padding = '8px';
+                routeItem.style.backgroundColor = index === initialSelectedIndex ? (route.isDirectRoute ? '#e3f2fd' : '#e8f5e9') : '#f5f5f5';
+                routeItem.style.borderRadius = '4px';
+                routeItem.style.cursor = 'pointer';
+                routeItem.style.border = index === initialSelectedIndex ? 
+                    (route.isDirectRoute ? '2px solid #3498db' : '2px solid #2ecc71') : 
+                    '1px solid #ddd';
+                routeItem.style.transition = 'all 0.2s ease';
+
+                const routeTypeIndicator = L.DomUtil.create('div', 'route-type-indicator', routeItem);
+                routeTypeIndicator.style.position = 'absolute';
+                routeTypeIndicator.style.right = '10px';
+                routeTypeIndicator.style.top = '8px';
+                routeTypeIndicator.style.width = '10px';
+                routeTypeIndicator.style.height = '10px';
+                routeTypeIndicator.style.borderRadius = '50%';
+                routeTypeIndicator.style.backgroundColor = route.isDirectRoute ? '#3498db' : '#2ecc71';
+
+                const label = L.DomUtil.create('label', '', routeItem);
+                label.style.display = 'flex';
+                label.style.alignItems = 'center';
+                label.style.margin = '0';
+                label.style.width = '100%';
+                
+                const radio = L.DomUtil.create('input', '', label);
+                radio.type = 'radio';
+                radio.name = 'route-selection';
+                radio.checked = index === initialSelectedIndex;
+                radio.dataset.index = index;
+                radio.style.marginRight = '10px';
+                radio.style.accentColor = route.isDirectRoute ? '#3498db' : '#2ecc71';
+                
+                const routeInfo = L.DomUtil.create('div', '', label);
+                routeInfo.style.flexGrow = '1';
+                
+                let displayScore, scoreLabel, scoreTooltip;
+                // Check if rawAStarScore is present and is a valid number
+                if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
+                    displayScore = route.rawAStarScore.toFixed(1);
+                    scoreLabel = "A* Cost";
+                    scoreTooltip = " (lower is better)";
+                } else {
+                    displayScore = (route.score !== undefined && route.score !== null && isFinite(route.score)) ? route.score.toFixed(1) : "N/A";
+                    scoreLabel = "Score";
+                    scoreTooltip = " (higher is better)";
+                }
+                
+                let scoreColor = '#e74c3c'; // Default for low scores/high costs
+                if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
+                    // Colors for A* cost (lower is better)
+                    if (route.rawAStarScore <= 50) scoreColor = '#2ecc71';      // Very Good
+                    else if (route.rawAStarScore <= 150) scoreColor = '#27ae60'; // Good
+                    else if (route.rawAStarScore <= 300) scoreColor = '#f39c12'; // Okay
+                    else if (route.rawAStarScore <= 500) scoreColor = '#e67e22'; // Poor
+                } else if (route.score !== undefined && route.score !== null && isFinite(route.score)) {
+                    // Colors for regular score (higher is better)
+                    if (route.score >= 8) scoreColor = '#2ecc71';
+                    else if (route.score >= 6) scoreColor = '#27ae60';
+                    else if (route.score >= 4) scoreColor = '#f39c12';
+                    else if (route.score >= 2) scoreColor = '#e67e22';
+                }
+                
+                const routeTypeLabel = route.isDirectRoute ? 
+                    '<span style="background-color: #e3f2fd; color: #3498db; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">DIRECT</span>' : 
+                    '<span style="background-color: #e8f5e9; color: #2ecc71; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">OPTIMIZED</span>';
+                
+                routeInfo.innerHTML = `
+                    <div style="font-weight: ${index === initialSelectedIndex ? 'bold' : 'normal'}; font-size: 14px;">${route.routeName || route.name || `Route ${index+1}`} ${routeTypeLabel}</div>
+                    <div style="font-size: 12px; margin-top: 4px; display: flex; justify-content: space-between;">
+                        <span style="color: ${scoreColor}; font-weight: bold;" title="${scoreLabel}${scoreTooltip}">${scoreLabel}: ${displayScore}</span>
+                        <span></span> 
+                    </div>
+                    <div style="font-size: 11px; color: #888; margin-top: 3px;">${route.description || (route.isDirectRoute ? "Standard direct route" : "Health-optimized route")}</div>
+                `;
+
+                L.DomEvent.on(radio, 'change', function () {
+                    if (!this.checked) return;
+                    const selectedIdx = parseInt(this.dataset.index);
+                    console.log(`[setupRouteControlPanel] Radio changed. Selected route index: ${selectedIdx}`);
+
+                    routes.forEach((r, i) => {
+                        r.isBest = (i === selectedIdx);
+                        if (r.routingControl) {
+                            try {
+                                if (i === selectedIdx) {
+                                    console.log(`[setupRouteControlPanel] SHOWING selected route: ${i} (${r.routeName || r.name})`);
+                                    if (r.originalWaypoints && r.originalWaypoints.length > 0) {
+                                        r.routingControl.getPlan().setWaypoints(r.originalWaypoints);
+                                    } else {
+                                        console.warn(`[setupRouteControlPanel] Route ${i} has no originalWaypoints to set!`);
+                                        // Attempt to use waypoints from control if available, otherwise, this might fail to draw
+                                        const currentWaypoints = r.routingControl.getWaypoints();
+                                        if (currentWaypoints && currentWaypoints.length > 0 && currentWaypoints[0].latLng) { // Check if they are valid
+                                            r.routingControl.getPlan().setWaypoints(currentWaypoints);
+                                        } else {
+                                            console.error(`[setupRouteControlPanel] Cannot show route ${i}, no valid waypoints found.`);
+                                            return; // Skip this route if no waypoints
+                                        }
+                                    }
+
+                                    if (!map.hasLayer(r.routingControl)) {
+                                        r.routingControl.addTo(map);
+                                        if (!currentRouting.routingControls.includes(r.routingControl)) {
+                                            currentRouting.routingControls.push(r.routingControl);
+                                        }
+                                    }
+                                    
+                                    // Force re-routing and listen for routesfound to style
+                                    r.routingControl.once('routesfound', function(e) {
+                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
+                                        const routeLine = e.routes[0].line;
+                                        if (routeLine) {
+                                            routeLine.setStyle({
+                                                color: r.isDirectRoute ? '#3498db' : '#2ecc71',
+                                                weight: 6, opacity: 0.9
+                                            });
+                                            routeLine.bringToFront();
+                                        }
+                                    });
+                                    r.routingControl.route(); // Trigger the routing
+
+                                    $(r.routingControl._container).show(); 
+                                    r.removedFromMap = false;
+
+                                } else { // For non-selected routes
+                                    console.log(`[setupRouteControlPanel] HIDING non-selected route: ${i} (${r.routeName || r.name})`);
+                                    if (map.hasLayer(r.routingControl)) {
+                                        map.removeControl(r.routingControl);
+                                        const ctrlIdx = currentRouting.routingControls.indexOf(r.routingControl);
+                                        if (ctrlIdx > -1) currentRouting.routingControls.splice(ctrlIdx, 1);
+                                    }
+                                    if (r.routingControl.getPlan) {
+                                        console.log(`[setupRouteControlPanel] Clearing waypoints for hidden route ${i}`);
+                                        r.routingControl.getPlan().setWaypoints([]);
+                                    }
+                                    $(r.routingControl._container).hide();
+                                    
+                                    // Attempt to remove its line layer if it exists
+                                    const lineToRemove = r.routingControl._line; // Leaflet Routing Machine often stores its line here
+                                    if (lineToRemove && map.hasLayer(lineToRemove)) {
+                                        map.removeLayer(lineToRemove);
+                                        console.log(`[setupRouteControlPanel] Removed _line for hidden route ${i}`);
+                                    }
+                                     // Also try to remove from its internal _routes array, if possible
+                                    if (r.routingControl._routes && r.routingControl._routes.length > 0) {
+                                        const internalRouteLine = r.routingControl._routes[0].line;
+                                        if (internalRouteLine && map.hasLayer(internalRouteLine)) {
+                                            map.removeLayer(internalRouteLine);
+                                            console.log(`[setupRouteControlPanel] Removed internal _routes[0].line for hidden route ${i}`);
+                                        }
+                                    }
+                                    r.removedFromMap = true;
+                                }
+                            } catch (e) {
+                                console.warn(`[setupRouteControlPanel] Error toggling route ${i} visibility/style:`, e);
+                            }
+                        }
+                    });
+
+                    // Update UI for all route items (styling the selected item)
+                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
+                        const isSelected = (i === selectedIdx);
+                        const currentRouteForStyle = routes[i]; // get current route for styling
+                        item.style.backgroundColor = isSelected ? (currentRouteForStyle.isDirectRoute ? '#e3f2fd' : '#e8f5e9') : '#f5f5f5';
+                        item.style.border = isSelected ? (currentRouteForStyle.isDirectRoute ? '2px solid #3498db' : '2px solid #2ecc71') : '1px solid #ddd';
+                        const textElement = item.querySelector('div > div:first-child');
+                        if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
+                    });
+
+                    if (typeof Scores !== 'undefined' && Scores.extractScoreData) {
+                        try {
+                            const selectedRouteData = routes[selectedIdx];
+                            Scores.extractScoreData(
+                                selectedRouteData,
+                                selectedRouteData.environmentDataList || [],
+                                currentPreferences,
+                                currentPatientCondition
+                            );
+    } catch (error) {
+                            console.warn("[setupRouteControlPanel] Error extracting score data:", error);
+                        }
+                    }
+                });
+
+                L.DomEvent.on(routeItem, 'click', function (e) {
+                    if (e.target !== radio) {
+                        radio.checked = true;
+                        const changeEvent = new Event('change');
+                        radio.dispatchEvent(changeEvent);
+                    }
+                });
+                L.DomEvent.on(routeItem, 'mouseover', function() { /* ... hover effects ... */ });
+                L.DomEvent.on(routeItem, 'mouseout', function() { /* ... hover effects ... */ });
+            });
+            return container;
+        }
+    });
+
+    window.routeControlPanel = new RoutePanel();
+    map.addControl(window.routeControlPanel);
+
+    // Make sure we trigger the change event for the initially selected route
+    // This ensures the correct route is displayed and its data extracted on load
+    setTimeout(() => {
+        const initialRadio = document.querySelector(`.route-selector input[data-index="${initialSelectedIndex}"]`);
+        if (initialRadio) {
+            console.log(`[setupRouteControlPanel] Triggering change for initial radio: index ${initialSelectedIndex}`);
+            const changeEvent = new Event('change', { bubbles: true });
+            initialRadio.dispatchEvent(changeEvent);
+        } else if (routes.length > 0 && typeof Scores !== 'undefined' && Scores.extractScoreData) {
+            console.log("[setupRouteControlPanel] No radio found, but routes exist. Extracting data for route 0.");
+            Scores.extractScoreData(routes[0], routes[0].environmentDataList || [], currentPreferences, currentPatientCondition);
+        }
+    }, 150); // Slightly increased timeout to ensure DOM is fully ready
+}
+
+// Internal helper function to format scores for display
+function formatScore(score) {
+    if (score === undefined || score === null) {
+        return "N/A";
+    }
+    return typeof score === 'number' ? score.toFixed(1) : "0.0";
+}
+
+async function route(
+    currentRouting = {
+        routingControl: null,
+        routingControls: []
+    }, 
+    currentPreferences = MasterPreferences.DEFAULT, 
+    currentPatientCondition = MasterPatientCondition.DEFAULT, 
+    waypointInputs = {
+        start: {
+            lat: 0,
+            lon: 0
+        },
+        end: {
+            lat: 0,
+            lon: 0
+        }}, 
+    additionalInfos = {
+        transportMode: 'driving',
+        percentageSlider: 1,
+        preCalculatedRoutes: null // New parameter to accept pre-calculated routes from A*
+    }, 
+    map, 
+    document,
+    csvData) {
+
+    console.log("[route] Function called. Condition:", currentPatientCondition ? currentPatientCondition.name : 'N/A', "Transport:", additionalInfos.transportMode);
+    
+    // Check if we're using pre-calculated routes from A*
+    if (additionalInfos.preCalculatedRoutes && Array.isArray(additionalInfos.preCalculatedRoutes)) {
+        console.log(`[route] Using ${additionalInfos.preCalculatedRoutes.length} pre-calculated routes from A* algorithm`);
+        
+        // Use the pre-calculated routes instead of generating new ones
+        return routeWithPrecalculatedRoutes(
+            currentRouting,
+            currentPreferences,
+            currentPatientCondition,
+            waypointInputs,
+            additionalInfos,
+            map,
+            document,
+            csvData
+        );
+    }
+    
+    // Ensure we're using the global csvData
+    if (!csvData && window.csvData) {
+        console.log("[route] Using global window.csvData since no csvData was provided");
+        csvData = window.csvData;
+    }
+
+    if (Environmental.startRouteCalculation) {
+        console.log("[route] Calling Environmental.startRouteCalculation()");
+        Environmental.startRouteCalculation();
+    } else {
+        console.warn("[route] Environmental.startRouteCalculation is not defined!");
+    }
+
+    let startLat, startLon, endLat, endLon; // Declare here for broader scope if needed by fallback in main catch
+
+    // Ensure allRoutes is initialized here and accessible to handleOnRouteFound
+    const allRoutes = [];
+    let currentRoute = {
+        score: -Infinity, environmentScore: null, routingControl: null,
+        route: null, length: null, poiCounts: null
+    };
+    let numberOfRoutes = (currentPatientCondition && currentPatientCondition.isPatientMode && currentPatientCondition.name !== 'default') ? 3 : 1; // Adjusted default for non-patient
+
+    // DEFINE handleOnRouteFound HERE, within the scope of route() so it can access allRoutes, etc.
+    async function handleOnRouteFound(e, routeControl, createdRoute, initialLeafletWaypoints) {
+        try {
+            console.log(`[handleOnRouteFound] Called for route: ${createdRoute.routeName}`);
+            createdRoute.originalWaypoints = initialLeafletWaypoints; // Store original L.LatLng waypoints
+
+            const routePath = e.routes[0];
+            if (!routePath) {
+                console.warn(`[handleOnRouteFound] No route data in event for ${createdRoute.routeName}`);
+                return;
+            }
+    
+            createdRoute.route = routePath;
+            createdRoute.length = routePath.summary ? routePath.summary.totalDistance : null;
+            createdRoute.duration = routePath.summary ? routePath.summary.totalTime : null;
+            if (routePath.coordinates && routePath.coordinates.length > 0) {
+                createdRoute.coordinates = routePath.coordinates;
+            }
+
+            // Add to allRoutes immediately
+            const routeExists = allRoutes.some(r => r.routingControl === createdRoute.routingControl);
+            if (!routeExists) {
+                allRoutes.push(createdRoute); // Add the route object to the shared array
+                console.log(`[handleOnRouteFound] Added ${createdRoute.routeName} to allRoutes. Count: ${allRoutes.length}`);
+            } else {
+                console.log(`[handleOnRouteFound] Route ${createdRoute.routeName} already in allRoutes.`);
+            }
+
+            // Fetch environmental data - FORCE using only real API data
+            console.log(`[handleOnRouteFound] Fetching environmental data for ${createdRoute.routeName}`);
+            window.useRealTimeData = true; // Force real-time data usage
+            window.REAL_DATA_ONLY = true; // Force real data only
+            
+            // Clear any global environmental cache to ensure fresh data
+            if (window.dataCache) {
+                console.log("[handleOnRouteFound] Clearing global environmental data cache to get fresh data");
+                window.dataCache = {};
+            }
+            
+            // Implement improved retry logic for environmental data
+            let environmentDataList = [];
+            let retryCount = 0;
+            const maxRetries = 5; // Increased retries
+            let hasEnoughRealData = false;
+            
+            while (retryCount < maxRetries && !hasEnoughRealData) {
+                try {
+                    // Force refresh on retries
+                    const forceRefresh = retryCount > 0;
+                    environmentDataList = await Environmental.getRouteEnvironmentalData(routePath, currentPatientCondition, forceRefresh);
+                    
+                    // Check if we have enough real API data
+                    if (environmentDataList && environmentDataList.length > 0) {
+                        // Track real data vs simulated data
+                        let realDataPoints = 0;
+                        let totalDataPoints = 0;
+                        
+                        environmentDataList.forEach(point => {
+                            if (point.temperature !== null) totalDataPoints++;
+                            if (point.airQuality !== null) totalDataPoints++;
+                            if (point.slope !== null) totalDataPoints++;
+                            
+                            // Count as real data if not marked as default, synthetic, or enhanced
+                            if (point.temperature !== null && !point.isDefault && !point.isSynthetic && !point.isEnhanced) {
+                                realDataPoints++;
+                            }
+                            if (point.airQuality !== null && !point.isDefault && !point.isSynthetic && !point.isEnhanced) {
+                                realDataPoints++;
+                            }
+                            if (point.slope !== null && !point.isDefault && !point.isSynthetic && !point.isEnhanced) {
+                                realDataPoints++;
+                            }
+                        });
+                        
+                        const realDataRatio = totalDataPoints > 0 ? realDataPoints / totalDataPoints : 0;
+                        console.log(`[handleOnRouteFound] Real data percentage: ${(realDataRatio * 100).toFixed(1)}% (${realDataPoints}/${totalDataPoints} data points)`);
+                        
+                        // If we have at least 50% real data, consider it good enough
+                        if (realDataRatio >= 0.5) {
+                            hasEnoughRealData = true;
+                            console.log(`[handleOnRouteFound] Got sufficient real API data on attempt ${retryCount+1}`);
+                        } else if (retryCount < maxRetries - 1) {
+                            console.warn(`[handleOnRouteFound] Only ${(realDataRatio * 100).toFixed(1)}% real data on attempt ${retryCount+1}, retrying...`);
+                            retryCount++;
+                            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
+                            continue;
+                        } else {
+                            console.warn(`[handleOnRouteFound] Using available data despite only having ${(realDataRatio * 100).toFixed(1)}% real data after ${retryCount+1} attempts`);
+                            hasEnoughRealData = true; // Use what we have on last attempt
+                        }
+                    } else {
+                        if (retryCount < maxRetries - 1) {
+                            console.warn(`[handleOnRouteFound] No environmental data returned on attempt ${retryCount+1}, retrying...`);
+                            retryCount++;
+                            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
+                            continue;
+                        } else {
+                            console.error(`[handleOnRouteFound] Failed to get any environmental data after ${maxRetries} attempts`);
+                            break;
+                        }
+                    }
+                } catch (envError) {
+                    console.error(`[handleOnRouteFound] Error fetching env data (attempt ${retryCount+1}):`, envError);
+                    if (retryCount < maxRetries - 1) {
+                        retryCount++;
+                        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
+                    } else {
+                        console.error(`[handleOnRouteFound] Failed to get environmental data after ${maxRetries} attempts due to errors`);
+                        break;
+                    }
+                }
+            }
+            
+            // Store environmental data in route object
+            // Ensure the structure matches what getEnvironmentalData returns, including top-level flags
+            createdRoute.environmentDataList = environmentDataList.map(envDataPoint => {
+                return {
+                    // Retain original coordinate if it was on the point, otherwise create one
+                    lat: envDataPoint.coordinate?.lat || createdRoute.coordinates[environmentDataList.indexOf(envDataPoint)]?.lat || 0,
+                    lon: envDataPoint.coordinate?.lng || envDataPoint.coordinate?.lon || createdRoute.coordinates[environmentDataList.indexOf(envDataPoint)]?.lng || 0,
+                    environmentData: envDataPoint // The entire rich object from getEnvironmentalData
+                };
+            });
+            console.log(`[handleOnRouteFound] Stored ${createdRoute.environmentDataList.length} enriched environmental data points for ${createdRoute.routeName}`);
+
+            // Fetch POI data
+            console.log(`[handleOnRouteFound] Fetching POI data for ${createdRoute.routeName}`);
+            let poiData;
+            try {
+                poiData = await PointOfInterests.getRoutePOIs(routePath);
+            } catch (poiError) {
+                console.error(`[handleOnRouteFound] Error fetching POI data for ${createdRoute.routeName}:`, poiError);
+                // Use minimal POI data if API call fails
+                poiData = createMinimalPOIData();
+            }
+            createdRoute.poiCounts = poiData;
+
+            // Calculate scores - using the renamed function to avoid duplicate declaration issue
+            console.log(`[handleOnRouteFound] Calculating scores for ${createdRoute.routeName}`);
+            const mappedEnvData = mapEnvironmentalDataToCoordinates(environmentDataList, createdRoute.coordinates);
+            
+            let scoreDataResult; // Renamed to avoid conflict with createdRoute.scoreData if it exists
+            try {
+                scoreDataResult = await Scores.calculateAllScores(
+                    createdRoute.poiCounts,
+                    mappedEnvData, // This should be the array of {environmentData: {...}, lat, lon} from getEnvironmentalData
+                    currentPreferences,
+                    currentPatientCondition
+                );
+                
+                console.log(`[handleOnRouteFound] Score calculation result for ${createdRoute.routeName}:`, JSON.stringify(scoreDataResult, null, 2));
+                if (scoreDataResult.realDataPercentage) {
+                    console.log(`[handleOnRouteFound] Score calculation used ${scoreDataResult.realDataPercentage.toFixed(1)}% real data`);
+                }
+            } catch (error) {
+                console.error(`[handleOnRouteFound] Score calculation error for ${createdRoute.routeName}:`, error);
+                scoreDataResult = null; // Ensure it's null on error
+            }
+
+            // Ensure scores are not null and assign them directly to createdRoute
+            if (!scoreDataResult) {
+                createdRoute.score = 5.0; // Default fallback
+                createdRoute.environmentScore = 5.0;
+                createdRoute.poiScore = 5.0;
+                createdRoute.specializedPoiScore = 0.0; // Default to 0 for specialized
+                createdRoute.realDataPercentage = 0;
+                createdRoute.envStats = {}; // Add empty envStats if scoring failed completely
+            } else {
+                // Assign all calculated scores and stats to the route object directly
+                createdRoute.score = scoreDataResult.score; // This is the final total score
+                createdRoute.environmentScore = scoreDataResult.environmentScore;
+                createdRoute.poiScore = scoreDataResult.poiScore;
+                createdRoute.specializedPoiScore = scoreDataResult.specializedPoiScore;
+                createdRoute.realDataPercentage = scoreDataResult.realDataPercentage;
+                // Pass along the detailed envStats from calculateAllScores for extractScoreData
+                createdRoute.envStats = scoreDataResult.envStats; 
+            }
+            
+            // Ensure the score is not zero or undefined - if so, give it a default value (should be less necessary now)
+            if (typeof createdRoute.score !== 'number' || Number.isNaN(createdRoute.score)) createdRoute.score = 5.0;
+            if (typeof createdRoute.environmentScore !== 'number' || Number.isNaN(createdRoute.environmentScore)) createdRoute.environmentScore = 5.0;
+            if (typeof createdRoute.poiScore !== 'number' || Number.isNaN(createdRoute.poiScore)) createdRoute.poiScore = 5.0;
+            if (typeof createdRoute.specializedPoiScore !== 'number' || Number.isNaN(createdRoute.specializedPoiScore)) createdRoute.specializedPoiScore = 0.0;
+            
+            console.log(`[handleOnRouteFound] Final scores assigned to ${createdRoute.routeName}: Total=${createdRoute.score}, Env=${createdRoute.environmentScore}, POI=${createdRoute.poiScore}, Specialized=${createdRoute.specializedPoiScore}, RealData=${createdRoute.realDataPercentage}%`);
+
+            // Update the route in allRoutes array
+            const existingRouteIndex = allRoutes.findIndex(r => r.routingControl === createdRoute.routingControl);
+            if (existingRouteIndex !== -1) {
+                allRoutes[existingRouteIndex] = { ...allRoutes[existingRouteIndex], ...createdRoute };
+            } else if (!allRoutes.some(r => r.routingControl === createdRoute.routingControl)) {
+                 allRoutes.push(createdRoute);
+            }
+
+            // If all routes have been processed, select the best and create control panel
+            if (allRoutes.length >= numberOfRoutes) {
+                // Select the best route
+                currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
+                
+                // Add route data to CSV collection
+                allRoutes.forEach((route, index) => {
+                    // Ensure route has startPoint and endPoint
+                    if (!route.startPoint) {
+                        route.startPoint = waypointInputs.start;
+                    }
+                    if (!route.endPoint) {
+                        route.endPoint = waypointInputs.end;
+                    }
+                    
+                    // Collect analytics data for CSV export
+                    const routeExportData = collectRouteAnalyticsData(
+                        route,
+                        currentPatientCondition,
+                        currentPreferences,
+                        index
+                    );
+                    
+                    // Add to csvData if it exists
+                    if (csvData && Array.isArray(csvData)) {
+                        console.log(`[handleOnRouteFound] Adding route to csvData: ${routeExportData.path_type} for ${routeExportData.patient_condition}`);
+                        
+                        // Check if this route is already in csvData
+                        const routeExists = csvData.some(r => 
+                            r.path_type === routeExportData.path_type && 
+                            r.patient_condition === routeExportData.patient_condition &&
+                            Math.abs(r.start_lat - routeExportData.start_lat) < 0.0001 &&
+                            Math.abs(r.start_lon - routeExportData.start_lon) < 0.0001 &&
+                            Math.abs(r.end_lat - routeExportData.end_lat) < 0.0001 &&
+                            Math.abs(r.end_lon - routeExportData.end_lon) < 0.0001
+                        );
+                        
+                        if (!routeExists) {
+                            // Directly use window.csvData to ensure we're modifying the global array
+                            if (window.csvData) {
+                                window.csvData.push(routeExportData);
+                                console.log(`[handleOnRouteFound] Added route ${routeExportData.path_type} for ${routeExportData.patient_condition} to global csvData. Count: ${window.csvData.length}`);
+                            } else {
+                                csvData.push(routeExportData);
+                                console.log(`[handleOnRouteFound] Added route ${routeExportData.path_type} for ${routeExportData.patient_condition} to local csvData. Count: ${csvData.length}`);
+                            }
+                        } else {
+                            console.log(`[handleOnRouteFound] Route ${routeExportData.path_type} for ${routeExportData.patient_condition} already exists in csvData.`);
+                        }
+                    } else {
+                        console.warn("[handleOnRouteFound] csvData is not available or not an array:", csvData);
+                    }
+                });
+                
+                // Show notification that routes are ready for download
+                toastr.success(`${allRoutes.length} routes collected for ${currentPatientCondition.name} condition. Click Download to export.`);
+                
+                // Update download button if function exists
+                if (typeof window.updateDownloadButtonText === 'function') {
+                    window.updateDownloadButtonText();
+                }
+                
+                // Set up the route control panel
+                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
+            }
+        } catch (error) {
+            console.error(`[handleOnRouteFound] Error processing route ${createdRoute.routeName}:`, error);
+            // Still add the route with default values
+            createdRoute.score = 5.0;
+            createdRoute.environmentScore = 5.0;
+            createdRoute.poiScore = 5.0;
+            
+            const existingRouteIndex = allRoutes.findIndex(r => r.routingControl === createdRoute.routingControl);
+            if (existingRouteIndex === -1) {
+                allRoutes.push(createdRoute);
+            }
+        }
+    }
+    
+    // Select the best route based on scores
+    function selectBestRoute(routes, condition) {
+        // Ensure all routes have valid scores
+        routes.forEach(route => {
+            if (route.score === undefined || route.score === null) {
+                route.score = 5.0; // Default score if undefined
+            }
+        });
+        
+        // Get the route with the highest score
+        let bestRoute = routes[0];
+        for (let i = 1; i < routes.length; i++) {
+            // Safely compare scores, handling potential undefined values
+            const currentScore = parseFloat(routes[i].score) || 0;
+            const bestScore = parseFloat(bestRoute.score) || 0;
+            
+            if (currentScore > bestScore) {
+                bestRoute = routes[i];
+            }
+        }
+        
+        console.log(`[selectBestRoute] Selected best route: ${bestRoute.routeName}, Score: ${bestRoute.score}`);
+        return bestRoute;
+    }
+
+    try { // TOP-LEVEL TRY BLOCK FOR THE ENTIRE ROUTE FUNCTION
+        
+        // Initializations and Validations
+        if (GenericUtils.checkIfAnyNaN(
+            waypointInputs.start.lat, waypointInputs.start.lon,
+            waypointInputs.end.lat, waypointInputs.end.lon
+        )) {
+            toastr.error("Invalid start or end point coordinates.");
+            return; 
+        }
+
+        startLat = parseFloat(waypointInputs.start.lat);
+        startLon = parseFloat(waypointInputs.start.lon);
+        endLat = parseFloat(waypointInputs.end.lat);
+        endLon = parseFloat(waypointInputs.end.lon);
+
+        if (isNaN(startLat) || isNaN(startLon) || isNaN(endLat) || isNaN(endLon)) {
+            toastr.error("Parsed coordinates are invalid.");
+            return;
+        }
+
+        // Clear existing routes and UI elements from the map
+        if (currentRouting.routingControl && map.hasLayer(currentRouting.routingControl)) {
+            try { map.removeControl(currentRouting.routingControl); } catch (e) { console.warn("Error removing main RC"); }
+        }
+        if (currentRouting.routingControls && Array.isArray(currentRouting.routingControls)) {
+            currentRouting.routingControls.forEach(control => {
+                if (control && map.hasLayer(control)) try { map.removeControl(control); } catch (e) { console.warn("Error removing array RC");}
+            });
+            currentRouting.routingControls = [];
+        }
+        if (window.routeControlPanel) {
+            try { map.removeControl(window.routeControlPanel); window.routeControlPanel = null; } catch (e) { console.warn("Error removing panel");}
+        }
+        if (window.routeInfoLabels) { 
+            window.routeInfoLabels.forEach(l => { if (l && l._map) map.removeLayer(l); });
+            window.routeInfoLabels = [];
+        }
+
+        var waypoints = [L.latLng(startLat, startLon), L.latLng(endLat, endLon)];
+        // Don't show loading screen here if it's already shown by routing.js
+        // LoadingScreen.show(document, `Calculating ${currentPatientCondition.isPatientMode ? currentPatientCondition.name + ' optimized' : ''} route...`); // Show loading screen before async operations
+
+        try {
+            console.log("[route-async-block] Async processing begins.");
+
+            if (currentPatientCondition.isPatientMode) {
+                console.log(`[route-async-block] Generating alternative routes for ${currentPatientCondition.name} condition`);
+                numberOfRoutes = Math.min(3, numberOfRoutes); 
+            } else {
+                numberOfRoutes = Math.min(2, numberOfRoutes); 
+            }
+            toastr.info(`Calculating optimal ${currentPatientCondition.name} route...`);
+
+            const routePromises = []; // Define routePromises here
+
+            if (currentPatientCondition.isPatientMode) {
+                const routePatterns = await generateConditionSpecificRoutes(
+                    currentPatientCondition, waypointInputs, additionalInfos.transportMode
+                );
+                console.log("[route-async-block] Generated route patterns:", routePatterns);
+                if (!routePatterns || routePatterns.length === 0) {
+                    console.error("[route-async-block] No valid route patterns generated.");
+                    throw new Error("No route patterns generated for patient mode.");
+                }
+
+                // Direct Route Promise
+                routePromises.push(new Promise(async (resolveRoutePromise) => {
+                    const directRouteControl = L.Routing.control({ 
+                        waypoints, 
+                        router: createMapboxRouter('walking'), 
+                        createMarker: function() { return null; } 
+                    });
+                    
+                    // Explicitly add to map first
+                    directRouteControl.addTo(map);
+                    currentRouting.routingControls.push(directRouteControl);
+                    
+                    directRouteControl.on('routesfound', (e) => {
+                        console.log("[route-async-block] Direct route found.");
+                        const createdRoute = { 
+                            routeName: "Direct Route", 
+                            isDirectRoute: true, // Mark as direct
+                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
+                            routingControl: directRouteControl 
+                        };
+                        handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
+                        resolveRoutePromise(true);
+                    });
+                    directRouteControl.on('routingerror', (e) => { console.error("Direct route error:", e); resolveRoutePromise(false); });
+                    directRouteControl.route();
+                }));
+
+                // Alternate Routes Promises
+                for (let i = 1; i < routePatterns.length && routePromises.length < numberOfRoutes; i++) { // Ensure we use pattern index and respect numberOfRoutes
+                    if (!routePatterns[i]) continue;
+                    routePromises.push(new Promise(async (resolveRoutePromise) => {
+                        const pattern = routePatterns[i];
+                        const altRouteWaypointsForControl = pattern.waypoints.map(wp => L.latLng(wp.lat, wp.lon));
+                        
+                        const altRouteControl = L.Routing.control({
+                            waypoints: altRouteWaypointsForControl, 
+                            router: createMapboxRouter('walking'), 
+                            createMarker: function() { return null; },
+                            lineOptions: {
+                                styles: [{ color: '#e74c3c', opacity: 0.7, weight: 4 }]
+                            }
+                        });
+                        
+                        // Explicitly add to map first
+                        altRouteControl.addTo(map);
+                        currentRouting.routingControls.push(altRouteControl);
+                        
+                        altRouteControl.on('routesfound', (e) => {
+                            console.log(`[route-async-block] Alt route ${pattern.name} found.`);
+                            const createdRoute = { 
+                                routeName: pattern.name, 
+                                isDirectRoute: false, // Mark as not direct
+                                ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
+                                routingControl: altRouteControl 
+                            };
+                            handleOnRouteFound(e, altRouteControl, createdRoute, altRouteWaypointsForControl); // Pass 'altRouteWaypointsForControl'
+                            resolveRoutePromise(true);
+                        });
+                        altRouteControl.on('routingerror', (e) => { console.error(`Alt route ${pattern.name} error:`, e); resolveRoutePromise(false); });
+                        altRouteControl.route();
+                    }));
+                }
+
+            } else { // Non-patient mode
+                routePromises.push(new Promise((resolveRoutePromise) => {
+                    const directRouteControl = L.Routing.control({ 
+                        waypoints, 
+                        router: createMapboxRouter(additionalInfos.transportMode || 'walking'), 
+                        createMarker: function() { return null; },
+                        lineOptions: {
+                            styles: [{ color: '#3498db', opacity: 0.8, weight: 5 }]
+                        }
+                    });
+                    
+                    directRouteControl.addTo(map);
+                    currentRouting.routingControls.push(directRouteControl);
+                    
+                    directRouteControl.on('routesfound', async (e) => {
+                        console.log("[route-async-block] Non-patient direct route found.");
+                        const createdRoute = { 
+                            routeName: "Direct Route", 
+                            isDirectRoute: true, // Mark as direct
+                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
+                            routingControl: directRouteControl 
+                        };
+                        await handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
+                        resolveRoutePromise(true);
+                    });
+                    
+                    directRouteControl.on('routingerror', (e) => { 
+                        console.error("Non-patient direct route error:", e);
+                        resolveRoutePromise(false);
+                    });
+                    
+                    directRouteControl.route();
+                }));
+            }
+
+            await Promise.all(routePromises);
+            console.log("[route-async-block] All route generation promises resolved. Total routes in allRoutes after processing:", allRoutes.length);
+
+            if (allRoutes.length === 0) {
+                console.warn("[route-async-block] No valid routes were created (allRoutes is empty).");
+                throw new Error("No routes generated by async block and processed by handleOnRouteFound.");
+            }
+
+            currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
+            if (!currentRoute) {
+                console.warn("[route-async-block] selectBestRoute did not return a valid route. Using first available from allRoutes.");
+                currentRoute = allRoutes.length > 0 ? allRoutes[0] : null;
+                if (!currentRoute) {
+                    console.error("[route-async-block] Critical error: No best route and allRoutes is empty after attempting selection.");
+                    throw new Error("No best route selectable and allRoutes is empty after selection attempt.");
+                }
+            }
+            
+            console.log("[route-async-block] Best route selected:", currentRoute.routeName, "Score:", currentRoute.score);
+            
+            // Display routes in UI instead of calling the problematic displayBestRoute function
+            showBestRoute();
+            
+            // A local function to show the best route
+            function showBestRoute() {
+                console.log(`[route] Displaying ${allRoutes.length} routes with best route: ${currentRoute?.routeName || 'Unknown'}`);
+                
+                // Apply styling to each route but don't control visibility here
+                // (visibility will be managed by setupRouteControlPanel radio buttons)
+                allRoutes.forEach(route => {
+                    if (route.routingControl) {
+                        const isBest = (route === currentRoute);
+                        
+                        // Set styling based on whether it's the best route
+                        const routeColor = isBest ? '#2ecc71' : '#3498db'; // Green for best, blue for alternatives
+                        const routeWeight = isBest ? 6 : 4;
+                        const routeOpacity = isBest ? 0.9 : 0.7;
+                        
+                        try {
+                            // Set line style only - don't control visibility here
+                            if (route.routingControl._container) {
+                                route.routingControl.options.lineOptions = {
+                                    styles: [{ color: routeColor, opacity: routeOpacity, weight: routeWeight }]
+                                };
+                                
+                                // Don't hide/show containers here - let radio buttons handle this
+                                // The setupRouteControlPanel will manage visibility
+                            }
+                        } catch (error) {
+                            console.error(`[route] Error styling route: ${error.message}`);
+                        }
+                    }
+                });
+                
+                // Let the setupRouteControlPanel function handle the control panel creation
+                // and route visibility management
+                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
+                
+                // Hide loading screen immediately after routes are displayed
+                LoadingScreen.hide(document);
+                console.log("[route] LoadingScreen hidden after setupRouteControlPanel");
+            }
+
+        } catch (errorInAsyncBlock) {
+            console.error("[route] Error during async route generation/processing block:", errorInAsyncBlock);
+            // Hide loading screen on error
+            LoadingScreen.hide(document);
+            displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
+        }
+
+    } catch (errorInMainRouteFunction) { // Catches errors from the main setup, or if rethrown from async block
+        console.error("[route] Error in main function execution (outside async block):", errorInMainRouteFunction);
+        displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon); 
+    } finally { // TOP-LEVEL FINALLY BLOCK
+        LoadingScreen.hide(document); // Always hide loading screen
+        if (Environmental.finalizeRouteCalculation) {
+            console.log("[route] Calling Environmental.finalizeRouteCalculation() in main finally block.");
+            Environmental.finalizeRouteCalculation();
+        } else {
+            console.warn("[route] Environmental.finalizeRouteCalculation is not defined in main finally block!");
+        }
+        
+        // CRITICAL FIX: Ensure routes are always added to csvData
+        console.log("[route] Adding routes to csvData in finally block, routes count:", allRoutes.length);
+        
+        // Force direct addition to window.csvData to guarantee it works
+        if (allRoutes && allRoutes.length > 0) {
+            if (!window.csvData) {
+                window.csvData = [];
+            }
+            
+            // Add each route directly to window.csvData
+                            allRoutes.forEach((route, index) => {
+                if (!route.startPoint) route.startPoint = waypointInputs.start;
+                if (!route.endPoint) route.endPoint = waypointInputs.end;
+                
+                // Generate route data
+                const routeData = collectRouteAnalyticsData(
+                    {
+                        ...route,
+                        startPoint: waypointInputs.start,
+                        endPoint: waypointInputs.end,
+                        transportMode: additionalInfos.transportMode || 'walking'
+                    },
+                    currentPatientCondition,
+                    currentPreferences,
+                    index
+                );
+                
+                // Simpler duplicate check
+                const isDuplicate = window.csvData.some(existingRoute => 
+                    existingRoute.path_type === routeData.path_type && 
+                    existingRoute.patient_condition === routeData.patient_condition &&
+                    Math.abs(existingRoute.start_lat - routeData.start_lat) < 0.0001
+                );
+                
+                if (!isDuplicate) {
+                    window.csvData.push(routeData);
+                    console.log(`[route] Force-added route ${routeData.path_type} to csvData. New length: ${window.csvData.length}`);
+                }
+            });
+            
+            // Show a notification
+            toastr.success(`${allRoutes.length} routes collected. Total in CSV: ${window.csvData.length}`);
+            
+            // Update the download button
+            if (typeof window.updateDownloadButtonText === 'function') {
+                window.updateDownloadButtonText();
+            }
+        } else {
+            console.warn("[route] No routes available to add to csvData in finally block");
+        }
+        
+        console.log("[route] Main route function execution complete (including finally block).");
+    }
+}
+
+// New helper function to create minimal POI data
+function createMinimalPOIData() {
+    return {
+        natureCount: 3,
+        entertainmentCount: 2,
+        nightlifeCount: 1,
+        tourismCount: 2,
+        hospitalCount: 1,
+        restingAreaCount: 3,
+        parkBenchCount: 5,
+        flatPathwayCount: 4,
+        wheelchairAccessCount: 2,
+        quietAreaCount: 2
+    };
+}
+
+/**
+ * Route with pre-calculated routes from A* algorithm
+ * This function handles routes that were already calculated by the A* algorithm
+ */
+async function routeWithPrecalculatedRoutes(
+    currentRouting,
+    currentPreferences,
+    currentPatientCondition,
+    waypointInputs,
+    additionalInfos,
+    map,
+    document,
+    csvData
+) {
+    try {
+        console.log("[routeWithPrecalculatedRoutes] Processing pre-calculated routes. Condition:", currentPatientCondition ? currentPatientCondition.name : 'N/A');
+        
+        if (Environmental.startRouteCalculation) {
+            Environmental.startRouteCalculation();
+        }
+        
+        // Clear existing routes first
+        if (currentRouting.routingControls && Array.isArray(currentRouting.routingControls)) {
+            currentRouting.routingControls.forEach(control => {
+                if (control && map.hasLayer(control)) {
+                    try { map.removeControl(control); } catch (e) { console.warn("Error removing control:", e); }
+                }
+            });
+            currentRouting.routingControls = [];
+        }
+        
+        const preCalculatedRoutes = additionalInfos.preCalculatedRoutes;
+        const allRoutes = [];
+        
+        console.log(`[routeWithPrecalculatedRoutes] Processing ${preCalculatedRoutes.length} pre-calculated routes`);
+        
+        // Create Leaflet routing controls for each pre-calculated route
+        for (let i = 0; i < preCalculatedRoutes.length; i++) {
+            const route = preCalculatedRoutes[i];
+            
+            console.log(`[routeWithPrecalculatedRoutes] Processing route ${i+1}: ${route.name}`);
+            
+            // Create waypoints from route data
+            const waypoints = route.waypoints.map(wp => L.latLng(wp.lat, wp.lon));
+            
+            // Create routing control
+            const routeColor = i === 0 ? '#2ecc71' : '#3498db'; // Green for best, blue for alternatives
+            const routeWeight = i === 0 ? 6 : 4;
+            const routeOpacity = i === 0 ? 0.9 : 0.7;
+            
+            const routingControl = L.Routing.control({
+                waypoints: waypoints,
+                routeWhileDragging: false,
+                fitSelectedRoutes: true,
+                showAlternatives: false,
+                lineOptions: {
+                    styles: [{ color: routeColor, opacity: routeOpacity, weight: routeWeight }],
+                    missingRouteTolerance: 100
+                },
+                router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
+                createMarker: function() { return null; }
+            });
+            
+            // DO NOT add to map here. setupRouteControlPanel will handle it.
+            // DO NOT push to currentRouting.routingControls here. setupRouteControlPanel will handle it.
+            
+            // Generate synthetic environmental data if not present
+            let environmentDataList = [];
+            
+            // If we're missing environmental data, create synthetic data
+            if (!route.environmentDataList || route.environmentDataList.length === 0) {
+                console.log(`[routeWithPrecalculatedRoutes] Generating synthetic environmental data for route ${i+1}`);
+                
+                // Create synthetic environmental data for this route
+                environmentDataList = createLocationBasedEnvironmentalData(
+                    route.coordinates || [
+                        { lat: waypointInputs.start.lat, lng: waypointInputs.start.lon },
+                        { lat: waypointInputs.end.lat, lng: waypointInputs.end.lon }
+                    ],
+                    20 // Generate 20 data points along the route
+                );
+            } else {
+                // Use existing environmental data
+                environmentDataList = route.environmentDataList;
+                console.log(`[routeWithPrecalculatedRoutes] Using existing environmental data for route ${i+1}: ${environmentDataList.length} points`);
+            }
+            
+            // Normalize the environment score to a 0-10 scale
+            // Default to 5.0 if score is invalid (Infinity, NaN, etc.)
+            let normalizedScore = 5.0;
+            const originalAStarCost = route.environmentalScore; // Preserve the raw A* cost
+
+            if (route.environmentalScore !== undefined && 
+                isFinite(route.environmentalScore) && 
+                !isNaN(route.environmentalScore)) {
+                // Convert to a 0-10 scale where lower original score is better
+                normalizedScore = Math.max(0, Math.min(10, 10 - (route.environmentalScore / 50)));
+        } else {
+                console.log(`[routeWithPrecalculatedRoutes] Invalid environmentalScore (${route.environmentalScore}), using default 5.0`);
+            }
+            
+            // Create route object with all data
+            const routeObject = {
+                routeName: route.name || `Route ${i+1}`,
+                name: route.name || `Route ${i+1}`,
+                description: route.description || "",
+                routingControl: routingControl,
+                score: normalizedScore, // This is the normalized score for general use
+                environmentScore: normalizedScore, // Also use normalized for consistency in other parts
+                rawAStarScore: originalAStarCost, // Store the original A* cost for panel display
+                poiScore: 5.0,
+                specializedPoiScore: 5.0,
+                startPoint: waypointInputs.start,
+                endPoint: waypointInputs.end,
+                transportMode: additionalInfos.transportMode,
+                waypoints: waypoints, // These are L.LatLng objects already
+                originalWaypoints: waypoints, // Store L.LatLng waypoints here as well
+                coordinates: route.coordinates || waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng })),
+                length: route.length || 1000,
+                shortestLength: route.shortestLength || route.length || 1000,
+                environmentDataList: environmentDataList, // Add the environmental data
+                isBest: i === 0, // Explicitly mark first route as best
+                removedFromMap: false // All routes will be on the map, styled by setupRouteControlPanel
+            };
+            
+            // Generate POI counts if missing
+            if (!routeObject.poiCounts) {
+                routeObject.poiCounts = {
+                    natureCount: 2 + Math.floor(Math.random() * 3),
+                    entertainmentCount: 1 + Math.floor(Math.random() * 2),
+                    nightlifeCount: Math.floor(Math.random() * 2),
+                    tourismCount: 1 + Math.floor(Math.random() * 2),
+                    hospitalCount: Math.floor(Math.random() * 2),
+                    restingAreaCount: 1 + Math.floor(Math.random() * 3),
+                    parkBenchCount: 2 + Math.floor(Math.random() * 4),
+                    flatPathwayCount: 1 + Math.floor(Math.random() * 3)
+                };
+            }
+            
+            // === Dynamic POI scoring ===
+            try {
+                // Map env data to coordinate structure expected by the scoring util
+                const mappedEnv = mapEnvironmentalDataToCoordinates(routeObject.environmentDataList, routeObject.coordinates);
+                const scoreRes = await Scores.calculateAllScores(
+                    routeObject.poiCounts,
+                    mappedEnv,
+                    currentPreferences,
+                    currentPatientCondition
+                );
+
+                if (scoreRes && typeof scoreRes.poiScore === 'number') {
+                    routeObject.poiScore = scoreRes.poiScore;
+                    routeObject.specializedPoiScore = scoreRes.specializedPoiScore;
+                    // Optionally keep total / env scores intact – objective is only POI
+                } else {
+                    console.warn('[routeWithPrecalculatedRoutes] calculateAllScores returned invalid POI data – keeping default values');
+                }
+            } catch (scoreErr) {
+                console.warn('[routeWithPrecalculatedRoutes] Failed to calculate dynamic POI score:', scoreErr);
+            }
+
+            // Store in array
+            allRoutes.push(routeObject);
+            
+            // Add to CSV data
+            if (csvData && Array.isArray(csvData)) {
+                const routeExportData = collectRouteAnalyticsData(
+                    routeObject,
+                    currentPatientCondition,
+                    currentPreferences,
+                    i
+                );
+                
+                // Check if this route is already in csvData
+                const routeExists = csvData.some(r => 
+                    r.path_type === routeExportData.path_type && 
+                    r.patient_condition === routeExportData.patient_condition &&
+                    Math.abs(r.start_lat - routeExportData.start_lat) < 0.0001 &&
+                    Math.abs(r.start_lon - routeExportData.start_lon) < 0.0001 &&
+                    Math.abs(r.end_lat - routeExportData.end_lat) < 0.0001 &&
+                    Math.abs(r.end_lon - routeExportData.end_lon) < 0.0001
+                );
+                
+                if (!routeExists) {
+                    if (window.csvData) {
+                        window.csvData.push(routeExportData);
+                    } else if (csvData) {
+                        csvData.push(routeExportData);
+                    }
+                }
+            }
+        }
+        
+        console.log(`[routeWithPrecalculatedRoutes] Created ${allRoutes.length} routes, control panel setup will manage map addition.`);
+        
+        // Set up route control panel
+        setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
+        
+        toastr.success(`Generated ${allRoutes.length} routes using A* algorithm for ${currentPatientCondition.name} condition`);
+        if (typeof window.updateDownloadButtonText === 'function') window.updateDownloadButtonText();
+        return true;
+    } catch (error) {
+        console.error("[routeWithPrecalculatedRoutes] Error processing pre-calculated routes:", error);
+        toastr.error("Error processing routes");
+        return false;
+    } finally {
+        if (Environmental.finalizeRouteCalculation) Environmental.finalizeRouteCalculation();
+    }
+}
+
+// New helper function to safely map environmental data to coordinates
+function mapEnvironmentalDataToCoordinates(environmentDataList, coordinates) {
+    if (!environmentDataList || environmentDataList.length === 0 || !coordinates || coordinates.length === 0) {
+        console.warn("[mapEnvironmentalDataToCoordinates] Missing data, returning empty array");
+        return [];
+    }
+    
+    return environmentDataList.map((env, index) => {
+        // Find corresponding coordinate, using last point if we run out
+        const coordinate = index < coordinates.length ? 
+            coordinates[index] : 
+            coordinates[coordinates.length - 1];
+            
+        return {
+            lat: coordinate?.lat || 0,
+            lon: coordinate?.lng || 0,
+            environmentData: env
+        };
+    });
+}
+
+export {
+    route,
+    collectRouteAnalyticsData
+}

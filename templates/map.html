@@ -1,0 +1,222 @@
+{%load static%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unimore Maps</title>
+    <link rel="icon" type="image/png" href="{% static 'img/flavicon.png' %}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/latest/toastr.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+    <link href="{% static 'css/map.css' %}" rel="stylesheet">
+    <link href="{% static 'css/suggestions.css' %}" rel="stylesheet">
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-3 col-lg-2 sidebar text-bg-dark p-3">
+                <a href="{% url 'home' %}" class="d-flex align-items-center mb-3 mb-md-auto me-md-auto text-white text-decoration-none">
+                    <img class="d-block mx-auto mb-2" src="{% static 'img/flavicon.png' %}" alt="" width="50" height="50">
+                </a>
+                <hr>
+                <form>
+                    <div class="mb-3">
+                        <label for="startPoint" class="form-label"><strong>Starting point</strong></label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="startPoint" placeholder="Type at least 3 letters...">
+                            <button class="btn btn-outline-secondary" type="button" id="useCurrentLocationStart" title="Use current location">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-geo-alt" viewBox="0 0 16 16">
+                                    <path d="M12.166 8.94c-.524 1.062-1.234 2.12-1.96 3.07A31.493 31.493 0 0 1 8 14.58a31.481 31.481 0 0 1-2.206-2.57c-.726-.95-1.436-2.008-1.96-3.07C3.304 7.867 3 6.862 3 6a5 5 0 0 1 10 0c0 .862-.305 1.867-.834 2.94zM8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10z"/>
+                                    <path d="M8 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm0 1a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="startPoint-suggestions" class="suggestions-container"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="endPoint" class="form-label"><strong>Arrival point</strong></label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="endPoint" placeholder="Type at least 3 letters...">
+                            <button class="btn btn-outline-secondary" type="button" id="useCurrentLocationEnd" title="Use current location">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-geo-alt" viewBox="0 0 16 16">
+                                    <path d="M12.166 8.94c-.524 1.062-1.234 2.12-1.96 3.07A31.493 31.493 0 0 1 8 14.58a31.481 31.481 0 0 1-2.206-2.57c-.726-.95-1.436-2.008-1.96-3.07C3.304 7.867 3 6.862 3 6a5 5 0 0 1 10 0c0 .862-.305 1.867-.834 2.94zM8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10z"/>
+                                    <path d="M8 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm0 1a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="endPoint-suggestions" class="suggestions-container"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="transportMode" class="form-label"><strong>Transport mode</strong></label>
+                        <select class="form-select" id="transportMode">
+                            <option value="driving" selected>Car</option>
+                            <option value="cycling">Bike</option>
+                            <option value="walking">On foot</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="percentageSlider" class="form-label"><strong>Distance tolerance</strong> (<span style="font-size:15px;" id="percentageValue">x1.0</span>)</label>
+                        <input type="range" class="form-range" id="percentageSlider" min="1" max="10" step="0.5" value="1">
+                    </div>
+                    <div class="mb-3">
+                        <label for="preferenceSet" class="form-label"><strong>Preferences</strong></label>
+                        <select class="form-select" id="preferenceSet">
+                            <option selected>Choose preferences...</option>
+                            {% for preference in user_preferences %}
+                                <option value="{{ preference.id }}">{{ preference.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="patientCondition">Patient Condition</label>
+                        <select class="form-control" id="patientCondition">
+                            <option value="default">No Specific Condition (Use Preferences)</option>
+                            <option value="respiratory">Respiratory Condition</option>
+                            <option value="cardiac">Cardiac Condition</option>
+                            <option value="arthritis">Arthritis/Joint Condition</option>
+                            <option value="mental">Mental Health</option>
+                            <option value="mobility">Mobility Impairment</option>
+                            <option value="diabetes">Diabetes</option>
+                        </select>
+                    </div>
+                    <div class="d-flex">
+                        <button id="searchButton" type="button" class="btn btn-primary me-2 w-50">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-search" viewBox="0 0 16 16">
+                                <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/>
+                            </svg>
+                        </button>
+                        <button id="cancelButton" type="button" class="btn btn-primary w-50">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-x-lg" viewBox="0 0 16 16">
+                                <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z"/>
+                              </svg>
+                        </button>
+                    </div>
+                </form>
+                <hr>
+                <div class="dropdown">
+                    <a href="#" class="d-block link-body-emphasis text-decoration-none dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" fill="#F04928" class="bi bi-layers-fill ms-5" viewBox="0 0 16 16">
+                            <path d="M7.765 1.559a.5.5 0 0 1 .47 0l7.5 4a.5.5 0 0 1 0 .882l-7.5 4a.5.5 0 0 1-.47 0l-7.5-4a.5.5 0 0 1 0-.882z"/>
+                            <path d="m2.125 8.567-1.86.992a.5.5 0 0 0 0 .882l7.5 4a.5.5 0 0 0 .47 0l7.5-4a.5.5 0 0 0 0-.882l-1.86-.992-5.17 2.756a1.5 1.5 0 0 1-1.41 0z"/>
+                        </svg>
+                        <strong style="color:white;margin-left:10px;">Layers</strong>
+                    </a>
+                    <ul class="dropdown-menu text-small shadow" style="background-color:#F04928;">
+                        <li><a id="pm25" class="dropdown-item" href="#">PM2.5</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a id="pm10" class="dropdown-item" href="#">PM10</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a id="no2" class="dropdown-item" href="#">NO2</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a id="o3" class="dropdown-item" href="#">O3</a></li>
+                    </ul>
+                </div>
+                
+                <hr>
+                <div class="d-flex justify-content-center mt-auto">
+                    <div id="dropUser" class="dropdown d-flex align-items-center">
+                        <a href="#" class="d-block link-body-emphasis text-decoration-none dropdown-toggle d-flex align-items-center" data-bs-toggle="dropdown" aria-expanded="false">
+                            {% if user.userprofile.profile_picture %}
+                                <img src="{{ user.userprofile.profile_picture.url }}" alt="Profile picture" width="47" height="47" class="rounded-circle">
+                            {% else %}
+                                <img src="{% static 'img/profile_pictures/default_profile_picture.png' %}" alt="Default profile picture" width="47" height="47" class="rounded-circle">
+                            {% endif %}
+                            <strong class="ms-3" style="color:white;">User</strong>
+                        </a>
+                        <ul class="dropdown-menu text-small shadow" style="background-color:#F04928;">
+                            {% if user.is_authenticated %}
+                                <li><a id="options" class="dropdown-item" href="{% url 'users:profile' %}">Profile<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-person mb-1" viewBox="0 0 16 16" style="margin-left:68px;">
+                                    <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6m2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0m4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4m-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10s-3.516.68-4.168 1.332c-.678.678-.83 1.418-.832 1.664z"/>
+                                  </svg></a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a id="download" class="dropdown-item">Get data<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-file-earmark-arrow-down" viewBox="0 0 16 16" style="margin-left:51px;">
+                                    <path d="M8.5 6.5a.5.5 0 0 0-1 0v3.793L6.354 9.146a.5.5 0 1 0-.708.708l2 2a.5.5 0 0 0 .708 0l2-2a.5.5 0 0 0-.708-.708L8.5 10.293z"/>
+                                    <path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2M9.5 3A1.5 1.5 0 0 0 11 4.5h2V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5.5z"/>
+                                  </svg></a></li>
+                                  <li><hr class="dropdown-divider"></li>
+                                <li>
+                                    <form id="logout-form" action="{% url 'users:logout' %}" method="post" style="display: none;">
+                                        {% csrf_token %}
+                                    </form>
+                                    <a id="options" class="dropdown-item" href="#" onclick="event.preventDefault(); document.getElementById('logout-form').submit();">
+                                        Logout
+                                        <svg style="margin-left: 60px; margin-bottom: 3px;" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-box-arrow-right" viewBox="0 0 16 16">
+                                            <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0z"/>
+                                            <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708z"/>
+                                        </svg>
+                                    </a>                                    
+                                </li>
+                            {% else %}
+                                <li><a id="options" class="dropdown-item" href="{% url 'users:signup' %}">Signup<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-pencil-square mb-1" viewBox="0 0 16 16" style="margin-left:50px;">
+                                    <path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/>
+                                    <path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5.5z"/>
+                                  </svg></a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a id="options" class="dropdown-item" href="{% url 'users:login' %}">Login<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-box-arrow-in-right mb-1" viewBox="0 0 16 16" style="margin-left:60px;">
+                                    <path fill-rule="evenodd" d="M6 3a.5.5 0 0 1 .5.5v2.5h5a.5.5 0 0 1 0 1h-5v2.5a.5.5 0 0 1-1 0v-6A.5.5 0 0 1 6 3z"/>
+                                    <path fill-rule="evenodd" d="M11.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L10.293 7.5H1.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+                                    <path fill-rule="evenodd" d="M13.5 15A1.5 1.5 0 0 0 15 13.5v-11A1.5 1.5 0 0 0 13.5 1h-8A1.5 1.5 0 0 0 4 2.5v1a.5.5 0 0 0 1 0v-1A.5.5 0 0 1 5.5 2h8a.5.5 0 0 1 .5.5v11a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 0-1 0v1A1.5 1.5 0 0 0 5.5 15h8z"/>
+                                  </svg></a></li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+                <div class="col-md-9 col-lg-10 p-0">
+                    <div id="map"></div>
+            </div>
+        </div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/latest/toastr.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.7/dist/umd/popper.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster-src.js"></script>
+    <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+    <script>
+        window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_access_token|escapejs }}";
+        window.LOCATIONIQ_ACCESS_TOKEN = "{{ locationiq_access_token|escapejs }}";
+    </script>
+    
+    <script src="{% static 'js/suggestions.js' %}"></script>
+    <script src="{% static 'js/map.js' %}"></script>
+    <script src="{% static 'js/markers.js' %}"></script>
+    <script src="{% static 'js/master/preferences.js' %}" type="module"></script>
+    <script src="{% static 'js/routing.js' %}" type="module"></script>
+    {% if benchmark_mode %}
+    <script src="{% static 'js/benchmark/automation.js' %}" type="module"></script>
+    {% endif %}
+    <script src="{% static 'js/location.js' %}"></script>
+    <script src="{% static 'js/heatmap.js' %}"></script>
+
+    <script>
+        {% if messages %}
+            {% for message in messages %}
+                toastr.options = {
+                    "closeButton": true,
+                    "progressBar": true
+                };
+                toastr["{{ message.tags }}"]("{{ message }}");
+            {% endfor %}
+        {% endif %}
+    </script>
+    <script>
+        const percentageSlider = document.getElementById('percentageSlider');
+        
+        if(percentageSlider){
+            const percentageValue = document.getElementById('percentageValue');
+
+            percentageSlider.addEventListener('input', function() {
+                percentageValue.textContent = `x${percentageSlider.value}`;
+            });
+        }
+    </script>
+</body>
+</html>

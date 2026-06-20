@@ -1,0 +1,43 @@
+body {
+    height: 100%;
+    margin: 10px;
+    font-family: 'Montserrat', sans-serif;
+    background-image: radial-gradient(circle farthest-corner at 10% 20%, rgba(255,209,67,1) 0%, rgba(255,145,83,1) 90%);
+}
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    overflow-y: auto;
+    height: 100%;
+    background-color: #f5f5f5;
+    padding: 20px;
+    border-radius: 10px;
+}
+.preferences-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.preferences-table th, .preferences-table td {
+    padding: 10px;
+    border: 1px solid #ddd;
+    text-align: center;
+    width: 50%;
+}
+.preferences-table th {
+    background-color: #f2f2f2;
+}
+.slider-value {
+    display: inline-block;
+    width: 150px;
+}
+#actionButton{
+    font-size: 16px;
+    background-color: #F04928;
+    border-color: #F04928;
+    color: white;
+    margin-top: 20px;
+}
+#actionButton:hover{
+    background-color: #de2500;
+    border-color: #de2500;
+}

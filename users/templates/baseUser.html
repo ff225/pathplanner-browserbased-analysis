@@ -1,0 +1,24 @@
+{% load crispy_forms_tags %}
+{%load static%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>{%block title%}{% endblock %}</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <link rel="icon" type="image/png" href="{%static 'img/flavicon.png'%}">
+    <link href="{% static 'css/usersTemplates.css' %}" rel="stylesheet">
+</head>
+<body>
+    <div id="formContainer" class="container">
+        <h2 id="myTitle">{%block h%}{%endblock%}</h2>
+        <form method="POST" enctype="multipart/form-data">
+            {% csrf_token %}
+            {{ form|crispy }}
+            {%block action%}
+            {%endblock%}
+            {%block href%}
+            {%endblock%}
+        </form>
+    </div>
+</body>
+</html>

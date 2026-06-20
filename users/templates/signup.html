@@ -1,0 +1,19 @@
+{% extends "baseUser.html"%}
+{% load crispy_forms_tags %}
+
+{%block title%}
+Signup
+{%endblock%}
+
+{%block h%}
+Signup
+{%endblock%}
+
+{%block action%}
+<button id="actionButton" style="margin-right:50px;" type="submit" class="btn btn-primary">Signup</button>
+{%endblock%}
+
+{%block href%}
+<a id="actionButton" style="margin-right:2px;" href="{% url 'users:login' %}" class="btn btn-primary">Login</a>
+<a style="margin-top:20px;" href="{% url 'home' %}" class="btn btn-secondary">Previous</a>
+{%endblock%}

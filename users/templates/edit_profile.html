@@ -1,0 +1,18 @@
+{% extends "baseUser.html"%}
+{% load crispy_forms_tags %}
+
+{%block title%}
+Edit profile
+{%endblock%}
+
+{%block h%}
+Edit profile
+{%endblock%}
+
+{%block action%}
+<button id="actionButton" type="submit" class="btn btn-primary">Save</button>
+{%endblock%}
+
+{%block href%}
+<a href="{% url 'users:profile' %}" class="btn btn-secondary" style="margin-top:20px;">Previous</a>
+{%endblock%}

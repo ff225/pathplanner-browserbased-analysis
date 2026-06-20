@@ -1,0 +1,68 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Montserrat:wght@400;700&display=swap');
+
+body{
+    font-family: 'Montserrat', sans-serif;
+}
+
+#map {
+    height: 100vh;
+}
+
+.sidebar {
+    height: 100vh;
+    overflow-y: auto;
+}
+
+.dropdown-toggle::after{
+    color: white;
+    display: none;
+}   
+
+#options, #pm25, #pm10, #no2, #o3, #searchButton, #cancelButton, #download{
+    background-color: #F04928;
+    border-color: #F04928;
+    color: white;
+}
+#options:hover, #pm25:hover, #pm10:hover, #no2:hover, #o3:hover, #searchButton:hover, #cancelButton:hover, #download:hover{
+    background-color: #de2500;
+    border-color: #de2500;
+}
+
+.active-layer {
+    background-color: #de2500 !important;
+}
+
+.leaflet-routing-container.leaflet-control {
+    max-height: 300px;
+    max-width: 500px;
+    overflow-y: auto;
+    background-color: white;
+}
+
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 8px;
+    background: #F04928;
+    border-radius: 5px;
+    outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    background: #F04928;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    background: #F04928;
+    border-radius: 50%;
+    cursor: pointer;
+}

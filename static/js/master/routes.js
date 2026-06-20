@@ -8,6 +8,456 @@ import * as PointOfInterests from '../services/pointOfInterest.js';
 import * as RoutePlanner from '../services/routePlanner.js';
 
 const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
+const ROUTE_COORDINATE_PRECISION = 5;
+
+function getThemeColor(variableName, fallback) {
+    try {
+        if (!globalThis.document || typeof globalThis.getComputedStyle !== 'function') {
+            return fallback;
+        }
+
+        const value = globalThis.getComputedStyle(globalThis.document.documentElement)
+            .getPropertyValue(variableName)
+            .trim();
+        return value || fallback;
+    } catch (error) {
+        return fallback;
+    }
+}
+
+function getRouteBaseColor(route) {
+    return route && route.isDirectRoute
+        ? getThemeColor('--route-direct', '#2563eb')
+        : getThemeColor('--route-optimized', '#16a34a');
+}
+
+function getRouteSelectedColor() {
+    return getThemeColor('--route-primary-strong', getThemeColor('--route-primary', '#f59e0b'));
+}
+
+function getRouteLineStyles(route, isSelected) {
+    if (isSelected) {
+        return [
+            { color: getThemeColor('--route-selected-outline', '#111827'), opacity: 0.45, weight: 12 },
+            { color: getThemeColor('--route-selected-halo', '#ffffff'), opacity: 0.95, weight: 9 },
+            { color: getRouteSelectedColor(), opacity: 1, weight: 6 }
+        ];
+    }
+
+    return [{
+        color: getRouteBaseColor(route),
+        opacity: 0.65,
+        weight: 4,
+        dashArray: route && route.isDirectRoute ? null : '8,8'
+    }];
+}
+
+function getRouteLineStyle(route, isSelected) {
+    if (isSelected) {
+        return {
+            color: getRouteSelectedColor(),
+            weight: 8,
+            opacity: 1,
+            lineCap: 'round',
+            lineJoin: 'round'
+        };
+    }
+
+    return {
+        color: getRouteBaseColor(route),
+        weight: 4,
+        opacity: 0.65,
+        dashArray: route && route.isDirectRoute ? null : '8,8'
+    };
+}
+
+function getRouteLineLayer(route) {
+    if (!route || !route.routingControl) {
+        return null;
+    }
+
+    if (route.routingControl._routes && route.routingControl._routes.length > 0 && route.routingControl._routes[0].line) {
+        return route.routingControl._routes[0].line;
+    }
+
+    return route.routingControl._line || null;
+}
+
+function syncRoutingControlLineOptions(route, isSelected) {
+    if (!route || !route.routingControl) {
+        return;
+    }
+
+    const existingLineOptions = route.routingControl.options.lineOptions || {};
+    route.routingControl.options.lineOptions = {
+        ...existingLineOptions,
+        styles: getRouteLineStyles(route, isSelected),
+        missingRouteTolerance: existingLineOptions.missingRouteTolerance || 100
+    };
+}
+
+function applyRouteLineStyle(route, isSelected) {
+    syncRoutingControlLineOptions(route, isSelected);
+
+    const routeLine = getRouteLineLayer(route);
+    if (routeLine && typeof routeLine.setStyle === 'function') {
+        routeLine.setStyle(getRouteLineStyle(route, isSelected));
+    }
+
+    if (isSelected && routeLine && typeof routeLine.bringToFront === 'function') {
+        routeLine.bringToFront();
+    }
+}
+
+function parseCoordinateValue(value) {
+    const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function coordinateToLatLon(coordinate) {
+    if (!coordinate) {
+        return null;
+    }
+
+    if (Array.isArray(coordinate)) {
+        const lon = parseCoordinateValue(coordinate[0]);
+        const lat = parseCoordinateValue(coordinate[1]);
+        return lat === null || lon === null ? null : { lat, lon };
+    }
+
+    const lat = parseCoordinateValue(coordinate.lat ?? coordinate.latitude);
+    const lon = parseCoordinateValue(coordinate.lng ?? coordinate.lon ?? coordinate.longitude);
+    return lat === null || lon === null ? null : { lat, lon };
+}
+
+function flattenCoordinateList(coordinates) {
+    if (!Array.isArray(coordinates)) {
+        return [];
+    }
+
+    return coordinates.reduce((flattened, coordinate) => {
+        if (Array.isArray(coordinate) && coordinate.length > 0 && (Array.isArray(coordinate[0]) || typeof coordinate[0] === 'object')) {
+            flattened.push(...flattenCoordinateList(coordinate));
+        } else {
+            flattened.push(coordinate);
+        }
+        return flattened;
+    }, []);
+}
+
+function getRouteCoordinates(route) {
+    if (!route) {
+        return [];
+    }
+
+    const routeLine = getRouteLineLayer(route);
+    const lineCoordinates = routeLine && typeof routeLine.getLatLngs === 'function'
+        ? flattenCoordinateList(routeLine.getLatLngs())
+        : [];
+
+    const candidates = [
+        route.coordinates,
+        route.route?.coordinates,
+        route.routingControl?._routes?.[0]?.coordinates,
+        lineCoordinates,
+        route.originalWaypoints,
+        route.waypoints
+    ];
+
+    for (const coordinates of candidates) {
+        if (Array.isArray(coordinates) && coordinates.length > 0) {
+            return flattenCoordinateList(coordinates);
+        }
+    }
+
+    return [];
+}
+
+function buildRouteGeometryKey(route) {
+    const coordinates = getRouteCoordinates(route);
+    const normalizedCoordinates = coordinates
+        .map(coordinateToLatLon)
+        .filter(Boolean)
+        .map(({ lat, lon }) => `${lat.toFixed(ROUTE_COORDINATE_PRECISION)},${lon.toFixed(ROUTE_COORDINATE_PRECISION)}`);
+
+    return normalizedCoordinates.join('|');
+}
+
+function hashString(value) {
+    const stringValue = String(value || '');
+    let hash = 0;
+
+    for (let i = 0; i < stringValue.length; i++) {
+        hash = ((hash << 5) - hash + stringValue.charCodeAt(i)) | 0;
+    }
+
+    return Math.abs(hash).toString(36) || '0';
+}
+
+function ensureRouteIdentity(route, routeIndex = 0) {
+    if (!route) {
+        return {
+            routePanelId: `route-missing-${routeIndex}`,
+            routeGeometryHash: 'missing'
+        };
+    }
+
+    const routeName = route.routeName || route.name || `Route ${routeIndex + 1}`;
+    const geometryKey = buildRouteGeometryKey(route) || route.routeGeometryKey;
+    const fallbackKey = [
+        routeName,
+        route.startPoint?.lat,
+        route.startPoint?.lon,
+        route.endPoint?.lat,
+        route.endPoint?.lon
+    ].join('|');
+    const routeKey = geometryKey || fallbackKey;
+    const routeGeometryHash = hashString(routeKey);
+
+    route.routeGeometryKey = routeKey;
+    route.routeGeometryHash = routeGeometryHash;
+    if (!route.routePanelId) {
+        route.routePanelId = `route-${routeGeometryHash}-${routeIndex}`;
+    }
+
+    return {
+        routePanelId: route.routePanelId,
+        routeGeometryHash: route.routeGeometryHash
+    };
+}
+
+function routeScoreValue(route) {
+    const score = Number.parseFloat(route?.score);
+    return Number.isFinite(score) ? score : -Infinity;
+}
+
+function routeRawCostValue(route) {
+    const rawCost = Number.parseFloat(route?.rawAStarScore);
+    return Number.isFinite(rawCost) ? rawCost : Infinity;
+}
+
+function shouldReplaceDuplicateRoute(existingRoute, candidateRoute) {
+    if (!existingRoute) {
+        return true;
+    }
+
+    if (candidateRoute?.isBest && !existingRoute.isBest) {
+        return true;
+    }
+
+    if (existingRoute.isDirectRoute !== candidateRoute?.isDirectRoute) {
+        return candidateRoute && candidateRoute.isDirectRoute === false;
+    }
+
+    const candidateScore = routeScoreValue(candidateRoute);
+    const existingScore = routeScoreValue(existingRoute);
+    if (candidateScore !== existingScore) {
+        return candidateScore > existingScore;
+    }
+
+    return routeRawCostValue(candidateRoute) < routeRawCostValue(existingRoute);
+}
+
+function removeRouteControlFromMap(route, map, currentRouting) {
+    if (!route || !route.routingControl) {
+        return;
+    }
+
+    const control = route.routingControl;
+
+    try {
+        if (map && typeof map.hasLayer === 'function' && map.hasLayer(control)) {
+            map.removeControl(control);
+        }
+    } catch (error) {
+        console.warn('[removeRouteControlFromMap] Error removing route control:', error);
+    }
+
+    if (currentRouting && Array.isArray(currentRouting.routingControls)) {
+        const controlIndex = currentRouting.routingControls.indexOf(control);
+        if (controlIndex > -1) {
+            currentRouting.routingControls.splice(controlIndex, 1);
+        }
+    }
+
+    if (control._container) {
+        if (typeof $ === 'function') {
+            $(control._container).hide();
+        } else {
+            control._container.style.display = 'none';
+        }
+    }
+
+    [control._line, getRouteLineLayer(route), control._routes?.[0]?.line].forEach(line => {
+        try {
+            if (line && map && typeof map.hasLayer === 'function' && map.hasLayer(line)) {
+                map.removeLayer(line);
+            }
+        } catch (error) {
+            console.warn('[removeRouteControlFromMap] Error removing route line:', error);
+        }
+    });
+
+    try {
+        if (control.getPlan) {
+            control.getPlan().setWaypoints([]);
+        }
+    } catch (error) {
+        console.warn('[removeRouteControlFromMap] Error clearing route waypoints:', error);
+    }
+
+    route.removedFromMap = true;
+}
+
+function deduplicateRoutesForComparison(routes, map, currentRouting) {
+    if (!Array.isArray(routes) || routes.length <= 1) {
+        return Array.isArray(routes) ? routes : [];
+    }
+
+    const uniqueRoutes = [];
+    const seenByGeometry = new Map();
+    const duplicateRoutes = [];
+
+    routes.forEach((route, index) => {
+        const identity = ensureRouteIdentity(route, index);
+        const routeKey = identity.routeGeometryHash || `route-${index}`;
+        const existing = seenByGeometry.get(routeKey);
+
+        if (!existing) {
+            uniqueRoutes.push(route);
+            seenByGeometry.set(routeKey, {
+                route,
+                uniqueIndex: uniqueRoutes.length - 1
+            });
+            return;
+        }
+
+        if (shouldReplaceDuplicateRoute(existing.route, route)) {
+            duplicateRoutes.push(existing.route);
+            uniqueRoutes[existing.uniqueIndex] = route;
+            seenByGeometry.set(routeKey, {
+                route,
+                uniqueIndex: existing.uniqueIndex
+            });
+            return;
+        }
+
+        duplicateRoutes.push(route);
+    });
+
+    duplicateRoutes.forEach(route => removeRouteControlFromMap(route, map, currentRouting));
+
+    if (duplicateRoutes.length > 0) {
+        routes.splice(0, routes.length, ...uniqueRoutes);
+        console.info(`[deduplicateRoutesForComparison] Collapsed ${duplicateRoutes.length} duplicate route(s) from the comparison panel.`);
+    }
+
+    return routes;
+}
+
+function coordinatesNearlyEqual(first, second, tolerance = 0.0001) {
+    const firstValue = parseCoordinateValue(first);
+    const secondValue = parseCoordinateValue(second);
+    return firstValue !== null && secondValue !== null && Math.abs(firstValue - secondValue) < tolerance;
+}
+
+function csvRouteMatchesRouteData(existingRoute, routeData) {
+    if (!existingRoute || !routeData) {
+        return false;
+    }
+
+    if (existingRoute.route_panel_id && routeData.route_panel_id && existingRoute.route_panel_id === routeData.route_panel_id) {
+        return true;
+    }
+
+    if (
+        existingRoute.route_geometry_hash &&
+        routeData.route_geometry_hash &&
+        existingRoute.route_geometry_hash === routeData.route_geometry_hash &&
+        existingRoute.patient_condition === routeData.patient_condition &&
+        existingRoute.transport_mode === routeData.transport_mode
+    ) {
+        return true;
+    }
+
+    return (
+        existingRoute.path_type === routeData.path_type &&
+        existingRoute.patient_condition === routeData.patient_condition &&
+        coordinatesNearlyEqual(existingRoute.start_lat, routeData.start_lat) &&
+        coordinatesNearlyEqual(existingRoute.start_lon, routeData.start_lon) &&
+        coordinatesNearlyEqual(existingRoute.end_lat, routeData.end_lat) &&
+        coordinatesNearlyEqual(existingRoute.end_lon, routeData.end_lon)
+    );
+}
+
+function getCsvDataStore(csvData) {
+    if (globalThis.window && Array.isArray(globalThis.window.csvData)) {
+        return globalThis.window.csvData;
+    }
+
+    return Array.isArray(csvData) ? csvData : null;
+}
+
+function addRouteDataToCsv(routeData, csvData, logPrefix) {
+    const csvStore = getCsvDataStore(csvData);
+    if (!csvStore) {
+        console.warn(`[${logPrefix}] csvData is not available or not an array:`, csvData);
+        return false;
+    }
+
+    const routeExists = csvStore.some(existingRoute => csvRouteMatchesRouteData(existingRoute, routeData));
+    if (routeExists) {
+        console.log(`[${logPrefix}] Route ${routeData.path_type} for ${routeData.patient_condition} already exists in csvData.`);
+        return false;
+    }
+
+    csvStore.push(routeData);
+    console.log(`[${logPrefix}] Added route ${routeData.path_type} for ${routeData.patient_condition} to csvData. Count: ${csvStore.length}`);
+    return true;
+}
+
+function buildRouteDataMatcher(route, currentPatientCondition) {
+    const identity = ensureRouteIdentity(route);
+    return {
+        route_panel_id: identity.routePanelId,
+        route_geometry_hash: identity.routeGeometryHash,
+        path_type: route.routeName || route.name || 'Default Route',
+        patient_condition: currentPatientCondition?.name || route.patient_condition || 'none',
+        transport_mode: route.transportMode || 'walking',
+        start_lat: route.startPoint?.lat,
+        start_lon: route.startPoint?.lon,
+        end_lat: route.endPoint?.lat,
+        end_lon: route.endPoint?.lon
+    };
+}
+
+function removeRouteFromCsvData(route, csvData, currentPatientCondition) {
+    const targets = [];
+    if (globalThis.window && Array.isArray(globalThis.window.csvData)) {
+        targets.push(globalThis.window.csvData);
+    }
+    if (Array.isArray(csvData) && !targets.includes(csvData)) {
+        targets.push(csvData);
+    }
+
+    if (targets.length === 0) {
+        return 0;
+    }
+
+    const routeMatcher = buildRouteDataMatcher(route, currentPatientCondition);
+    let removedCount = 0;
+
+    targets.forEach(target => {
+        for (let index = target.length - 1; index >= 0; index--) {
+            if (csvRouteMatchesRouteData(target[index], routeMatcher)) {
+                target.splice(index, 1);
+                removedCount++;
+            }
+        }
+    });
+
+    return removedCount;
+}
 
 // Add the createMapboxRouter function
 function createMapboxRouter(profile = 'walking') {
@@ -33,7 +483,7 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
             fitSelectedRoutes: true,
             showAlternatives: false, // Keep it simple for fallback
             lineOptions: {
-                styles: [{ color: '#0073d4', opacity: 0.8, weight: 5 }],
+                styles: getRouteLineStyles({ isDirectRoute: true }, true),
                 missingRouteTolerance: 100
             },
             router: L.Routing.mapbox(MAPBOX_ACCESS_TOKEN, {
@@ -59,11 +509,11 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
 // Add the analytics helper function at the top of the file
 function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
     console.log(`[collectRouteAnalyticsData] Processing route: ${route.routeName}, condition: ${condition.name}`);
-    
+
     // Format timestamp
     const now = new Date();
     const timestamp = now.toISOString();
-    
+
     // Use custom route name if available
     let routeName = 'Default Route';
     if (route.name) {
@@ -75,12 +525,15 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
     } else {
         routeName = `Alternative Route ${routeIndex}`;
     }
-    
+    const routeIdentity = ensureRouteIdentity(route, routeIndex);
+
     // Basic route data
     const routeData = {
         timestamp: timestamp,
         city: "Reggio Emilia",
         path_type: routeName,
+        route_panel_id: routeIdentity.routePanelId,
+        route_geometry_hash: routeIdentity.routeGeometryHash,
         start_lat: route.startPoint?.lat || "",
         start_lon: route.startPoint?.lon || "",
         end_lat: route.endPoint?.lat || "",
@@ -96,36 +549,36 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
         data_source: "real_api", // Will be updated based on actual data
         real_data_percent: "0" // Will be updated based on actual data
     };
-    
+
     // Environmental data processing
     if (route.environmentDataList && route.environmentDataList.length > 0) {
         console.log(`[collectRouteAnalyticsData] Found ${route.environmentDataList.length} environmental data points for route`);
-        
+
         // Filter to only use real API data points
-        const realDataPoints = route.environmentDataList.filter(point => 
+        const realDataPoints = route.environmentDataList.filter(point =>
             !point.isDefault && !point.isSynthetic && !point.isEnhanced
         );
-        
+
         console.log(`[collectRouteAnalyticsData] Found ${realDataPoints.length}/${route.environmentDataList.length} real API data points`);
-        
+
         // Calculate real data percentage
-        const realDataPercent = route.environmentDataList.length > 0 ? 
+        const realDataPercent = route.environmentDataList.length > 0 ?
             (realDataPoints.length / route.environmentDataList.length) * 100 : 0;
-        
+
         routeData.real_data_percent = realDataPercent.toFixed(1);
         routeData.data_source = realDataPercent >= 50 ? "real_api" : "mixed_data";
         routeData.env_data_count = route.environmentDataList.length;
         routeData.real_data_count = realDataPoints.length;
-        
+
         // Determine which data set to use (real only or all)
         const dataToUse = realDataPoints.length >= 3 ? realDataPoints : route.environmentDataList;
         console.log(`[collectRouteAnalyticsData] Using ${dataToUse === realDataPoints ? 'real-only' : 'mixed'} data for statistics (${dataToUse.length} points)`);
-        
+
         // Extract environmental statistics - Temperature
         const temperatureValues = dataToUse
             .filter(point => point.temperature !== null && point.temperature !== undefined)
             .map(point => point.temperature);
-            
+
         if (temperatureValues.length > 0) {
             const sum = temperatureValues.reduce((total, val) => total + val, 0);
             routeData.temperature = (sum / temperatureValues.length).toFixed(1);
@@ -138,12 +591,12 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
             routeData.temperature_max = "N/A";
             routeData.temperature_points = 0;
         }
-        
+
         // Extract environmental statistics - Humidity
         const humidityValues = dataToUse
             .filter(point => point.humidity !== null && point.humidity !== undefined)
             .map(point => point.humidity);
-            
+
         if (humidityValues.length > 0) {
             const sum = humidityValues.reduce((total, val) => total + val, 0);
             routeData.humidity = (sum / humidityValues.length).toFixed(1);
@@ -154,12 +607,12 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
             routeData.humidity_min = "N/A";
             routeData.humidity_max = "N/A";
         }
-        
+
         // Extract environmental statistics - Air Quality
         const airQualityValues = dataToUse
             .filter(point => point.airQuality !== null && point.airQuality !== undefined)
             .map(point => point.airQuality);
-            
+
         if (airQualityValues.length > 0) {
             const sum = airQualityValues.reduce((total, val) => total + val, 0);
             routeData.air_quality = (sum / airQualityValues.length).toFixed(1);
@@ -172,39 +625,39 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
             routeData.air_quality_max = "N/A";
             routeData.air_quality_points = 0;
         }
-        
+
         // Extract environmental statistics - Weather
         const weatherValues = dataToUse
             .filter(point => point.weather)
             .map(point => point.weather);
-            
+
         if (weatherValues.length > 0) {
             // Find most common weather condition
             const weatherCounts = {};
             weatherValues.forEach(weather => {
                 weatherCounts[weather] = (weatherCounts[weather] || 0) + 1;
             });
-            
+
             let mostFrequent = weatherValues[0];
             let maxCount = 0;
-            
+
             for (const weather in weatherCounts) {
                 if (weatherCounts[weather] > maxCount) {
                     mostFrequent = weather;
                     maxCount = weatherCounts[weather];
                 }
             }
-            
+
             routeData.weather_condition = mostFrequent;
         } else {
             routeData.weather_condition = "N/A";
         }
-        
+
         // Extract environmental statistics - Slope
         const slopeValues = dataToUse
             .filter(point => point.slope !== null && point.slope !== undefined)
             .map(point => Math.abs(point.slope));
-            
+
         if (slopeValues.length > 0) {
             const sum = slopeValues.reduce((total, val) => total + val, 0);
             routeData.avg_slope = (sum / slopeValues.length).toFixed(2);
@@ -215,12 +668,12 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
             routeData.max_slope = "N/A";
             routeData.slope_points = 0;
         }
-        
+
         // Extract environmental statistics - Noise
         const noiseValues = dataToUse
             .filter(point => point.noise !== null && point.noise !== undefined)
             .map(point => point.noise);
-            
+
         if (noiseValues.length > 0) {
             const sum = noiseValues.reduce((total, val) => total + val, 0);
             routeData.avg_noise = (sum / noiseValues.length).toFixed(1);
@@ -229,20 +682,20 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
             routeData.avg_noise = "N/A";
             routeData.max_noise = "N/A";
         }
-        
+
         // Environmental scores directly from route object - Use raw scores without scaling
         routeData.env_score = route.environmentScore ? route.environmentScore.toFixed(1) : "N/A";
-        
+
         // Add environmental data stats
         routeData.env_data_quality = (route.environmentDataList.length / (route.coordinates?.length || 1)).toFixed(2);
-        
+
         // Log detailed summary
         console.log(`[collectRouteAnalyticsData] Environmental data summary for ${routeName}:`);
         console.log(`- Temperature: ${routeData.temperature} (${routeData.temperature_min}-${routeData.temperature_max})`);
         console.log(`- Air Quality: ${routeData.air_quality} (${routeData.air_quality_min}-${routeData.air_quality_max})`);
         console.log(`- Slope: ${routeData.avg_slope} (max: ${routeData.max_slope})`);
         console.log(`- Real Data: ${routeData.real_data_percent}% (${realDataPoints.length}/${route.environmentDataList.length})`);
-        
+
     } else {
         // No environmental data found - mark clearly as missing data
         console.warn(`[collectRouteAnalyticsData] No environmentDataList found for ${routeName}`);
@@ -259,7 +712,7 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
         routeData.data_source = "missing";
         routeData.real_data_percent = "0.0";
     }
-    
+
     // POI counts
     if (route.poiCounts) {
         routeData.num_poi_nature = route.poiCounts.natureCount || 0;
@@ -267,7 +720,7 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
         routeData.num_poi_nightlife = route.poiCounts.nightlifeCount || 0;
         routeData.num_poi_tourism = route.poiCounts.tourismCount || 0;
         routeData.num_poi_hospital = route.poiCounts.hospitalCount || 0;
-        
+
         // Specialized POIs for explainability
         routeData.rest_areas = route.poiCounts.restingAreaCount || 0;
         routeData.park_benches = route.poiCounts.parkBenchCount || 0;
@@ -279,7 +732,7 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
         routeData.water_fountains = route.poiCounts.waterFountainCount || 0;
         routeData.cafes = route.poiCounts.cafeCount || 0;
     }
-    
+
     // Patient sensitivity values
     if (condition.isPatientMode && condition.name !== "default") {
         routeData.temperature_sensitivity = condition.temperatureSensitivity || 0;
@@ -288,20 +741,20 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
         routeData.slope_sensitivity = condition.slopeSensitivity || 0;
         routeData.noise_sensitivity = condition.noiseSensitivity || 0;
     }
-    
+
     // POI weights
     routeData.poi_nature_weight = preferences.nature || 0;
     routeData.poi_entertainment_weight = preferences.entertainment || 0;
     routeData.poi_nightlife_weight = preferences.nightlife || 0;
     routeData.poi_tourism_weight = preferences.tourism || 0;
     routeData.poi_hospital_weight = preferences.hospital || 0;
-    
+
     // Score breakdown - Use raw scores without scaling
     routeData.total_score = route.score ? route.score.toFixed(1) : "0";
     routeData.env_score = route.environmentScore ? route.environmentScore.toFixed(1) : "0";
     routeData.poi_score = route.poiScore ? route.poiScore.toFixed(1) : "0";
     routeData.specialized_poi_score = route.specializedPoiScore ? route.specializedPoiScore.toFixed(1) : "0";
-    
+
     console.log(`[collectRouteAnalyticsData] Generated data for route: ${routeName}, score: ${routeData.total_score}, real data: ${routeData.real_data_percent}%`);
     return routeData;
 }
@@ -310,13 +763,13 @@ function collectRouteAnalyticsData(route, condition, preferences, routeIndex) {
 async function generateConditionSpecificRoutes(condition, waypoints, transportMode) {
     try {
         console.log(`[generateConditionSpecificRoutes] Environmental A* + Mapbox for ${condition.name}`);
-        
+
         const map = window.map || null;
         if (!map) {
             console.warn("[generateConditionSpecificRoutes] No map — cannot run grid A*");
             return generateDefaultRoutePatterns(condition, waypoints, transportMode);
         }
-        
+
         const optimizedRoutes = await RoutePlanner.generateOptimizedRoutes(
             waypoints.start,
             waypoints.end,
@@ -326,23 +779,23 @@ async function generateConditionSpecificRoutes(condition, waypoints, transportMo
             condition.isPatientMode ? 3 : 2,
             { preferAStar: true }
         );
-        
+
         console.log(`[generateConditionSpecificRoutes] ${optimizedRoutes.length} route(s) for ${condition.name}`);
         optimizedRoutes.forEach((route, index) => {
             console.log(`  Route ${index + 1}: ${route.name} [${route.routingEngine || 'unknown'}], score: ${route.environmentalScore}`);
         });
-        
+
         if (optimizedRoutes.length === 0) {
             console.warn("[generateConditionSpecificRoutes] No routes from RoutePlanner");
             return generateDefaultRoutePatterns(condition, waypoints, transportMode);
         }
-        
+
         // Convert to the format expected by the route function
         const routePatterns = RoutePlanner.convertToRoutesFormat(optimizedRoutes);
-        
+
         console.log(`[generateConditionSpecificRoutes] Generated ${routePatterns.length} total routes for ${condition.name}`);
         return routePatterns;
-        
+
     } catch (error) {
         console.error("[generateConditionSpecificRoutes] Error generating routes with A*:", error);
         // Fall back to the original implementation if A* fails
@@ -362,24 +815,24 @@ function generateConditionWaypoints(condition, waypoints) {
     const startLon = parseFloat(waypoints.start.lon);
     const endLat = parseFloat(waypoints.end.lat);
     const endLon = parseFloat(waypoints.end.lon);
-    
+
     // Calculate midpoint for alternative routes
     const midLat = (startLat + endLat) / 2;
     const midLon = (startLon + endLon) / 2;
-    
+
     // Calculate distance between points to determine reasonable offsets
     const latDiff = Math.abs(startLat - endLat);
     const lonDiff = Math.abs(startLon - endLon);
-    
+
     // Calculate offsets in different directions (larger than default for more distinct routes)
     const offset = Math.max(latDiff, lonDiff) * 0.5; // 50% of the total distance
-    
+
     console.log(`[generateConditionWaypoints] Generating waypoints for ${condition.name} condition`);
     console.log(`  Start: ${startLat},${startLon} | End: ${endLat},${endLon}`);
     console.log(`  Midpoint: ${midLat},${midLon} | Offset: ${offset}`);
-    
+
     const waypointPatterns = [];
-    
+
     // Generate different patterns based on patient condition
     switch(condition.name) {
         case "respiratory":
@@ -387,7 +840,7 @@ function generateConditionWaypoints(condition, waypoints) {
             // 1. Clean air (parks, away from main roads)
             // 2. Low pollution areas
             // 3. Flat terrain (to minimize exertion)
-            
+
             // Route 1: Green route through parks (north-east path)
             waypointPatterns.push({
                 name: "Green Air Route",
@@ -398,7 +851,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Low traffic route (skirting around main roads)
             waypointPatterns.push({
                 name: "Low Pollution Route",
@@ -409,7 +862,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Flat terrain route
             waypointPatterns.push({
                 name: "Low Exertion Route",
@@ -421,13 +874,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         case "cardiac":
             // For cardiac conditions, prioritize:
             // 1. Flat terrain (avoid hills)
             // 2. Emergency access (near medical facilities)
             // 3. Rest opportunities
-            
+
             // Route 1: Flat terrain route
             waypointPatterns.push({
                 name: "Heart-Friendly Flat Route",
@@ -438,7 +891,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Medical access route
             waypointPatterns.push({
                 name: "Medical Access Route",
@@ -449,7 +902,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Rest stops route
             waypointPatterns.push({
                 name: "Rest Areas Route",
@@ -461,13 +914,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         case "mobility":
             // For mobility conditions, prioritize:
             // 1. Flat terrain (no slopes)
             // 2. Smooth surfaces (well-maintained paths)
             // 3. Accessibility features (curb cuts, wide paths)
-            
+
             // Route 1: Wheelchair accessible route
             waypointPatterns.push({
                 name: "Wheelchair Accessible Route",
@@ -478,7 +931,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Smooth surface route
             waypointPatterns.push({
                 name: "Smooth Surface Route",
@@ -489,7 +942,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Flat terrain route
             waypointPatterns.push({
                 name: "Zero-Slope Route",
@@ -501,13 +954,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         case "mental":
             // For mental health conditions, prioritize:
             // 1. Quiet areas (low noise)
             // 2. Green spaces (parks, nature)
             // 3. Low sensory load (away from crowds)
-            
+
             // Route 1: Nature therapy route
             waypointPatterns.push({
                 name: "Nature Therapy Route",
@@ -518,7 +971,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Quiet zone route
             waypointPatterns.push({
                 name: "Quiet Zone Route",
@@ -529,7 +982,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Low stimulation route
             waypointPatterns.push({
                 name: "Low Stimulation Route",
@@ -541,13 +994,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         case "arthritis":
             // For arthritis conditions, prioritize:
             // 1. Smooth surfaces (well-maintained paths)
             // 2. Flat terrain (no slopes)
             // 3. Rest opportunities (benches)
-            
+
             // Route 1: Joint-friendly surface route
             waypointPatterns.push({
                 name: "Joint-Friendly Surface Route",
@@ -558,7 +1011,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Flat terrain route
             waypointPatterns.push({
                 name: "Zero-Incline Route",
@@ -569,7 +1022,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Rest areas route
             waypointPatterns.push({
                 name: "Rest Spot Route",
@@ -581,13 +1034,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         case "diabetes":
             // For diabetes conditions, prioritize:
             // 1. Moderate exercise (some gentle slopes)
             // 2. Access to services (pharmacies, food)
             // 3. Rest opportunities
-            
+
             // Route 1: Moderate exercise route
             waypointPatterns.push({
                 name: "Moderate Exercise Route",
@@ -598,7 +1051,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 2: Services access route
             waypointPatterns.push({
                 name: "Services Access Route",
@@ -609,7 +1062,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             // Route 3: Rest and recovery route
             waypointPatterns.push({
                 name: "Rest and Recovery Route",
@@ -621,7 +1074,7 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
             break;
-            
+
         default:
             // Default route patterns for unknown conditions
             waypointPatterns.push({
@@ -633,7 +1086,7 @@ function generateConditionWaypoints(condition, waypoints) {
                     { lat: endLat, lon: endLon }
                 ]
             });
-            
+
             waypointPatterns.push({
                 name: "Alternative Route B",
                 description: "Eastern alternative path",
@@ -644,13 +1097,13 @@ function generateConditionWaypoints(condition, waypoints) {
                 ]
             });
     }
-    
+
     // Log the generated waypoint patterns
     console.log(`[generateConditionWaypoints] Generated ${waypointPatterns.length} waypoint patterns for ${condition.name}`);
     waypointPatterns.forEach((pattern, index) => {
         console.log(`  Pattern ${index+1}: ${pattern.name} - ${pattern.description}`);
     });
-    
+
     return waypointPatterns;
 }
 
@@ -658,7 +1111,7 @@ function generateConditionWaypoints(condition, waypoints) {
 function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
         // Generate different route patterns based on patient condition
         const routePatterns = [];
-        
+
         // Add direct route for all conditions
         routePatterns.push({
             name: "Direct Route",
@@ -668,17 +1121,17 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                 { lat: waypoints.end.lat, lon: waypoints.end.lon }
             ]
         });
-        
+
         if (condition.isPatientMode) {
             // Calculate midpoint for alternative routes
             const midLat = (parseFloat(waypoints.start.lat) + parseFloat(waypoints.end.lat)) / 2;
             const midLon = (parseFloat(waypoints.start.lon) + parseFloat(waypoints.end.lon)) / 2;
-            
+
             // Calculate distance between points to determine reasonable offsets
             const latDiff = Math.abs(parseFloat(waypoints.start.lat) - parseFloat(waypoints.end.lat));
             const lonDiff = Math.abs(parseFloat(waypoints.start.lon) - parseFloat(waypoints.end.lon));
             const offset = Math.max(latDiff, lonDiff) * 0.3; // 30% of the total distance
-            
+
             switch(condition.name) {
                 case "respiratory":
                     // Add routes that prioritize green areas and low traffic
@@ -691,7 +1144,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Green Route",
                         description: "Route through park areas with better air quality",
@@ -702,7 +1155,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 case "cardiac":
                     // Add routes that are flat and near medical facilities
                     routePatterns.push({
@@ -714,7 +1167,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Medical Access Route",
                         description: "Route near medical facilities",
@@ -725,7 +1178,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 case "mental":
                     // Add routes that are quiet and have nature
                     routePatterns.push({
@@ -737,7 +1190,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Nature Route",
                         description: "Route with natural elements for relaxation",
@@ -748,7 +1201,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 case "mobility":
                     // Add routes with accessible paths
                     routePatterns.push({
@@ -760,7 +1213,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Flat Path Route",
                         description: "Route with minimal slopes",
@@ -771,7 +1224,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 case "arthritis":
                     // Add routes that are flat and have rest areas
                     routePatterns.push({
@@ -783,7 +1236,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Rest Area Route",
                         description: "Route with benches and rest opportunities",
@@ -794,7 +1247,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 case "diabetes":
                     // Add routes with medical facilities and moderate exercise
                     routePatterns.push({
@@ -806,7 +1259,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Moderate Exercise Route",
                         description: "Route with appropriate inclines for safe exercise",
@@ -817,7 +1270,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                         ]
                     });
                     break;
-                    
+
                 default:
                     // Default route patterns
                     routePatterns.push({
@@ -828,7 +1281,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                             { lat: waypoints.end.lat, lon: waypoints.end.lon }
                         ]
                     });
-                    
+
                     routePatterns.push({
                         name: "Alternative Route B",
                         waypoints: [
@@ -839,7 +1292,7 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
                     });
             }
         }
-        
+
         return routePatterns;
 }
 
@@ -852,7 +1305,8 @@ function generateDefaultRoutePatterns(condition, waypoints, transportMode) {
  * @param {Array} routes - Array of route objects
  * @param {Object} currentRouting - Current routing state
  */
-function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondition, currentPreferences) {
+function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondition, currentPreferences, csvData) {
+    routes = Array.isArray(routes) ? routes : [];
     console.log(`[setupRouteControlPanel] Setting up control panel with ${routes.length} routes. Condition: ${currentPatientCondition ? currentPatientCondition.name : 'N/A'}, Prefs: ${currentPreferences ? currentPreferences.label : 'N/A'}`);
 
     // Remove existing panel if it exists
@@ -878,38 +1332,44 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
         });
     }
     currentRouting.routingControls = []; // Reset for the new set of routes
+    routes = deduplicateRoutesForComparison(routes, map, currentRouting);
+
+    if (routes.length === 0) {
+        console.warn("[setupRouteControlPanel] No routes available after de-duplication.");
+        return;
+    }
 
     // Ensure all routes have valid scores
-    routes.forEach(route => {
+    routes.forEach((route, index) => {
+        ensureRouteIdentity(route, index);
         if (route.score === undefined || route.score === null) route.score = 5.0;
         if (route.environmentScore === undefined || route.environmentScore === null) route.environmentScore = 5.0;
         if (route.poiScore === undefined || route.poiScore === null) route.poiScore = 5.0;
         console.log(`[setupRouteControlPanel] Route: ${route.routeName || route.name || 'Unnamed'}, Raw Score: ${route.score ? route.score.toFixed(1) : 'N/A'}, EnvScore: ${route.environmentScore ? route.environmentScore.toFixed(1) : 'N/A'}, POI: ${route.poiScore ? route.poiScore.toFixed(1) : 'N/A'}`);
     });
 
+    const bestRouteIndex = routes.findIndex(route => route.isBest);
     const optimizedRouteIndex = routes.findIndex(route => !route.isDirectRoute);
-    const initialSelectedIndex = optimizedRouteIndex !== -1 ? optimizedRouteIndex : 0;
+    const initialSelectedIndex = bestRouteIndex !== -1 ? bestRouteIndex : (optimizedRouteIndex !== -1 ? optimizedRouteIndex : 0);
 
     // Pre-process to add only the selected route's control to the map initially
     routes.forEach((route, index) => {
         if (route.routingControl) {
             try {
-                const routeLine = route.routingControl._routes && route.routingControl._routes.length > 0 ? route.routingControl._routes[0].line : null;
+                const routeLine = getRouteLineLayer(route);
+                syncRoutingControlLineOptions(route, index === initialSelectedIndex);
                 if (index === initialSelectedIndex) {
                     console.log(`[setupRouteControlPanel] Initially ADDING & SHOWING route ${index}: ${route.routeName || route.name}`);
                     if (!map.hasLayer(route.routingControl)) {
                         route.routingControl.addTo(map);
                         currentRouting.routingControls.push(route.routingControl); // Add to managed list
                     }
-                    $(route.routingControl._container).show();
+                    if (route.routingControl._container) {
+                        $(route.routingControl._container).show();
+                    }
                     if (routeLine) {
                         if (!map.hasLayer(routeLine)) map.addLayer(routeLine);
-                        routeLine.setStyle({
-                            color: route.isDirectRoute ? '#3498db' : '#2ecc71',
-                            weight: 6,
-                            opacity: 0.9
-                        });
-                        routeLine.bringToFront();
+                        applyRouteLineStyle(route, true);
                     }
                     route.removedFromMap = false;
                 } else {
@@ -919,7 +1379,9 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     if (map.hasLayer(route.routingControl)) {
                         map.removeControl(route.routingControl);
                     }
-                    $(route.routingControl._container).hide();
+                    if (route.routingControl._container) {
+                        $(route.routingControl._container).hide();
+                    }
                     if (routeLine && map.hasLayer(routeLine)) {
                         map.removeLayer(routeLine);
                     }
@@ -930,6 +1392,55 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             }
         }
     });
+
+    function removeRouteAtIndex(routeIndex) {
+        const routeToRemove = routes[routeIndex];
+        if (!routeToRemove) {
+            return;
+        }
+
+        const checkedRadio = document.querySelector('.route-selector input[name="route-selection"]:checked');
+        const currentSelectedIndex = checkedRadio ? parseInt(checkedRadio.dataset.index, 10) : initialSelectedIndex;
+        const routeName = routeToRemove.routeName || routeToRemove.name || `Route ${routeIndex + 1}`;
+
+        removeRouteControlFromMap(routeToRemove, map, currentRouting);
+        const removedCsvRows = removeRouteFromCsvData(routeToRemove, csvData, currentPatientCondition);
+        routes.splice(routeIndex, 1);
+
+        if (typeof window.updateDownloadButtonText === 'function') {
+            window.updateDownloadButtonText();
+        }
+
+        if (routes.length === 0) {
+            if (window.routeControlPanel) {
+                try {
+                    map.removeControl(window.routeControlPanel);
+                    window.routeControlPanel = null;
+                } catch (error) {
+                    console.warn("[setupRouteControlPanel] Error removing empty route panel:", error);
+                }
+            }
+            toastr.info(`Removed ${routeName}. No comparison routes remain.`);
+            console.log(`[setupRouteControlPanel] Removed ${routeName}; removed ${removedCsvRows} CSV row(s).`);
+            return;
+        }
+
+        let nextSelectedIndex = currentSelectedIndex;
+        if (routeIndex === currentSelectedIndex) {
+            nextSelectedIndex = Math.min(routeIndex, routes.length - 1);
+        } else if (routeIndex < currentSelectedIndex) {
+            nextSelectedIndex = currentSelectedIndex - 1;
+        }
+        nextSelectedIndex = Math.max(0, Math.min(nextSelectedIndex, routes.length - 1));
+
+        routes.forEach((route, index) => {
+            route.isBest = index === nextSelectedIndex;
+        });
+
+        console.log(`[setupRouteControlPanel] Removed ${routeName}; removed ${removedCsvRows} CSV row(s). Reselecting index ${nextSelectedIndex}.`);
+        toastr.info(`Removed ${routeName} from comparison.`);
+        setupRouteControlPanel(map, routes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+    }
 
     const RoutePanel = L.Control.extend({
         options: { position: 'topright' },
@@ -943,20 +1454,20 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             container.style.maxHeight = '400px';
             container.style.overflowY = 'auto';
             container.style.minWidth = '280px';
-            
+
             const title = L.DomUtil.create('div', 'title', container);
             title.innerHTML = '<strong>Route Comparison</strong>';
             title.style.marginBottom = '10px';
             title.style.fontSize = '16px';
             title.style.borderBottom = '1px solid #eee';
             title.style.paddingBottom = '5px';
-            
+
             const instructions = L.DomUtil.create('div', 'instructions', container);
             instructions.innerHTML = 'Compare direct vs. condition-optimized route:';
             instructions.style.marginBottom = '12px';
             instructions.style.fontSize = '13px';
             instructions.style.color = '#666';
-            
+
             if (routes.length === 2) {
                 const comparisonHeader = L.DomUtil.create('div', 'comparison-header', container);
                 comparisonHeader.style.display = 'flex';
@@ -970,7 +1481,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
 
                 const directRoute = routes.find(r => r.isDirectRoute);
                 const optimizedRoute = routes.find(r => !r.isDirectRoute);
-                
+
                 if (directRoute && optimizedRoute && directRoute.length && optimizedRoute.length) {
                     const directLength = (directRoute.length / 1000).toFixed(2);
                     const optimizedLength = (optimizedRoute.length / 1000).toFixed(2);
@@ -978,7 +1489,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     const directScore = directRoute.score || 0;
                     const optimizedScore = optimizedRoute.score || 0;
                     const scoreDiff = ((optimizedScore - directScore) / Math.max(1, directScore) * 100).toFixed(0);
-                    
+
                     const comparisonText = L.DomUtil.create('div', 'comparison-text', container);
                     comparisonText.style.fontSize = '12px';
                     comparisonText.style.marginBottom = '15px';
@@ -989,7 +1500,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
 
                     const isLonger = optimizedRoute.length > directRoute.length;
                     const isBetterScore = optimizedScore > directScore;
-                    
+
                     comparisonText.innerHTML = `
                         <div style="font-weight: bold; margin-bottom: 3px;">Route Comparison:</div>
                         <div>The optimized route is ${isLonger ? `${lengthDiff}% longer` : `${Math.abs(lengthDiff)}% shorter`} (${optimizedLength} vs ${directLength} km)</div>
@@ -999,43 +1510,66 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             }
 
             routes.forEach((route, index) => {
+                const routeBaseColor = getRouteBaseColor(route);
+                const selectedColor = getRouteSelectedColor();
+                const selectedBackgroundColor = getThemeColor('--route-selected-bg', '#fff7ed');
+                const defaultBackgroundColor = getThemeColor('--route-card-bg', '#f5f5f5');
                 const routeItem = L.DomUtil.create('div', 'route-item', container);
+                routeItem.dataset.routePanelId = route.routePanelId;
                 routeItem.style.marginBottom = '10px';
-                routeItem.style.padding = '8px';
-                routeItem.style.backgroundColor = index === initialSelectedIndex ? (route.isDirectRoute ? '#e3f2fd' : '#e8f5e9') : '#f5f5f5';
+                routeItem.style.padding = '8px 42px 8px 8px';
+                routeItem.style.backgroundColor = index === initialSelectedIndex ? selectedBackgroundColor : defaultBackgroundColor;
                 routeItem.style.borderRadius = '4px';
                 routeItem.style.cursor = 'pointer';
-                routeItem.style.border = index === initialSelectedIndex ? 
-                    (route.isDirectRoute ? '2px solid #3498db' : '2px solid #2ecc71') : 
-                    '1px solid #ddd';
+                routeItem.style.border = index === initialSelectedIndex ? `3px solid ${selectedColor}` : '1px solid #ddd';
+                routeItem.style.position = 'relative';
                 routeItem.style.transition = 'all 0.2s ease';
 
                 const routeTypeIndicator = L.DomUtil.create('div', 'route-type-indicator', routeItem);
                 routeTypeIndicator.style.position = 'absolute';
-                routeTypeIndicator.style.right = '10px';
+                routeTypeIndicator.style.right = '34px';
                 routeTypeIndicator.style.top = '8px';
                 routeTypeIndicator.style.width = '10px';
                 routeTypeIndicator.style.height = '10px';
                 routeTypeIndicator.style.borderRadius = '50%';
-                routeTypeIndicator.style.backgroundColor = route.isDirectRoute ? '#3498db' : '#2ecc71';
+                routeTypeIndicator.style.backgroundColor = routeBaseColor;
+
+                const removeButton = L.DomUtil.create('button', 'route-remove-button', routeItem);
+                removeButton.type = 'button';
+                removeButton.innerHTML = '&times;';
+                removeButton.title = `Remove ${route.routeName || route.name || `Route ${index + 1}`}`;
+                removeButton.setAttribute('aria-label', removeButton.title);
+                removeButton.style.position = 'absolute';
+                removeButton.style.right = '8px';
+                removeButton.style.top = '4px';
+                removeButton.style.width = '22px';
+                removeButton.style.height = '22px';
+                removeButton.style.border = '1px solid rgba(15, 23, 42, 0.18)';
+                removeButton.style.borderRadius = '50%';
+                removeButton.style.background = 'rgba(255, 255, 255, 0.9)';
+                removeButton.style.color = '#334155';
+                removeButton.style.fontSize = '16px';
+                removeButton.style.lineHeight = '18px';
+                removeButton.style.cursor = 'pointer';
+                removeButton.style.padding = '0';
 
                 const label = L.DomUtil.create('label', '', routeItem);
                 label.style.display = 'flex';
                 label.style.alignItems = 'center';
                 label.style.margin = '0';
                 label.style.width = '100%';
-                
+
                 const radio = L.DomUtil.create('input', '', label);
                 radio.type = 'radio';
                 radio.name = 'route-selection';
                 radio.checked = index === initialSelectedIndex;
                 radio.dataset.index = index;
                 radio.style.marginRight = '10px';
-                radio.style.accentColor = route.isDirectRoute ? '#3498db' : '#2ecc71';
-                
+                radio.style.accentColor = selectedColor;
+
                 const routeInfo = L.DomUtil.create('div', '', label);
                 routeInfo.style.flexGrow = '1';
-                
+
                 let displayScore, scoreLabel, scoreTooltip;
                 // Check if rawAStarScore is present and is a valid number
                 if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
@@ -1047,7 +1581,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     scoreLabel = "Score";
                     scoreTooltip = " (higher is better)";
                 }
-                
+
                 let scoreColor = '#e74c3c'; // Default for low scores/high costs
                 if (route.rawAStarScore !== undefined && route.rawAStarScore !== null && isFinite(route.rawAStarScore)) {
                     // Colors for A* cost (lower is better)
@@ -1062,16 +1596,16 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     else if (route.score >= 4) scoreColor = '#f39c12';
                     else if (route.score >= 2) scoreColor = '#e67e22';
                 }
-                
-                const routeTypeLabel = route.isDirectRoute ? 
-                    '<span style="background-color: #e3f2fd; color: #3498db; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">DIRECT</span>' : 
+
+                const routeTypeLabel = route.isDirectRoute ?
+                    '<span style="background-color: #e3f2fd; color: #3498db; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">DIRECT</span>' :
                     '<span style="background-color: #e8f5e9; color: #2ecc71; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin-left: 5px;">OPTIMIZED</span>';
-                
+
                 routeInfo.innerHTML = `
                     <div style="font-weight: ${index === initialSelectedIndex ? 'bold' : 'normal'}; font-size: 14px;">${route.routeName || route.name || `Route ${index+1}`} ${routeTypeLabel}</div>
                     <div style="font-size: 12px; margin-top: 4px; display: flex; justify-content: space-between;">
                         <span style="color: ${scoreColor}; font-weight: bold;" title="${scoreLabel}${scoreTooltip}">${scoreLabel}: ${displayScore}</span>
-                        <span></span> 
+                        <span></span>
                     </div>
                     <div style="font-size: 11px; color: #888; margin-top: 3px;">${route.description || (route.isDirectRoute ? "Standard direct route" : "Health-optimized route")}</div>
                 `;
@@ -1085,11 +1619,12 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                         r.isBest = (i === selectedIdx);
                         if (r.routingControl) {
                             try {
-                                if (i === selectedIdx) {
-                                    console.log(`[setupRouteControlPanel] SHOWING selected route: ${i} (${r.routeName || r.name})`);
-                                    if (r.originalWaypoints && r.originalWaypoints.length > 0) {
-                                        r.routingControl.getPlan().setWaypoints(r.originalWaypoints);
-                                    } else {
+	                                if (i === selectedIdx) {
+	                                    console.log(`[setupRouteControlPanel] SHOWING selected route: ${i} (${r.routeName || r.name})`);
+                                        syncRoutingControlLineOptions(r, true);
+	                                    if (r.originalWaypoints && r.originalWaypoints.length > 0) {
+	                                        r.routingControl.getPlan().setWaypoints(r.originalWaypoints);
+	                                    } else {
                                         console.warn(`[setupRouteControlPanel] Route ${i} has no originalWaypoints to set!`);
                                         // Attempt to use waypoints from control if available, otherwise, this might fail to draw
                                         const currentWaypoints = r.routingControl.getWaypoints();
@@ -1107,68 +1642,45 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                                             currentRouting.routingControls.push(r.routingControl);
                                         }
                                     }
-                                    
+
                                     // Force re-routing and listen for routesfound to style
-                                    r.routingControl.once('routesfound', function(e) {
-                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
-                                        const routeLine = e.routes[0].line;
-                                        if (routeLine) {
-                                            routeLine.setStyle({
-                                                color: r.isDirectRoute ? '#3498db' : '#2ecc71',
-                                                weight: 6, opacity: 0.9
-                                            });
-                                            routeLine.bringToFront();
-                                        }
-                                    });
-                                    r.routingControl.route(); // Trigger the routing
+	                                    r.routingControl.once('routesfound', function(e) {
+	                                        console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
+	                                        const routeLine = e.routes[0].line || getRouteLineLayer(r);
+	                                        if (routeLine) {
+	                                            routeLine.setStyle(getRouteLineStyle(r, true));
+	                                            if (typeof routeLine.bringToFront === 'function') routeLine.bringToFront();
+	                                        }
+                                            applyRouteLineStyle(r, true);
+	                                    });
+	                                    r.routingControl.route(); // Trigger the routing
 
-                                    $(r.routingControl._container).show(); 
-                                    r.removedFromMap = false;
-
-                                } else { // For non-selected routes
-                                    console.log(`[setupRouteControlPanel] HIDING non-selected route: ${i} (${r.routeName || r.name})`);
-                                    if (map.hasLayer(r.routingControl)) {
-                                        map.removeControl(r.routingControl);
-                                        const ctrlIdx = currentRouting.routingControls.indexOf(r.routingControl);
-                                        if (ctrlIdx > -1) currentRouting.routingControls.splice(ctrlIdx, 1);
-                                    }
-                                    if (r.routingControl.getPlan) {
-                                        console.log(`[setupRouteControlPanel] Clearing waypoints for hidden route ${i}`);
-                                        r.routingControl.getPlan().setWaypoints([]);
-                                    }
-                                    $(r.routingControl._container).hide();
-                                    
-                                    // Attempt to remove its line layer if it exists
-                                    const lineToRemove = r.routingControl._line; // Leaflet Routing Machine often stores its line here
-                                    if (lineToRemove && map.hasLayer(lineToRemove)) {
-                                        map.removeLayer(lineToRemove);
-                                        console.log(`[setupRouteControlPanel] Removed _line for hidden route ${i}`);
-                                    }
-                                     // Also try to remove from its internal _routes array, if possible
-                                    if (r.routingControl._routes && r.routingControl._routes.length > 0) {
-                                        const internalRouteLine = r.routingControl._routes[0].line;
-                                        if (internalRouteLine && map.hasLayer(internalRouteLine)) {
-                                            map.removeLayer(internalRouteLine);
-                                            console.log(`[setupRouteControlPanel] Removed internal _routes[0].line for hidden route ${i}`);
+                                        if (r.routingControl._container) {
+                                            $(r.routingControl._container).show();
                                         }
-                                    }
-                                    r.removedFromMap = true;
-                                }
+	                                    r.removedFromMap = false;
+
+	                                } else { // For non-selected routes
+	                                    console.log(`[setupRouteControlPanel] HIDING non-selected route: ${i} (${r.routeName || r.name})`);
+                                        syncRoutingControlLineOptions(r, false);
+                                        removeRouteControlFromMap(r, map, currentRouting);
+	                                }
                             } catch (e) {
                                 console.warn(`[setupRouteControlPanel] Error toggling route ${i} visibility/style:`, e);
                             }
                         }
                     });
 
-                    // Update UI for all route items (styling the selected item)
-                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
-                        const isSelected = (i === selectedIdx);
-                        const currentRouteForStyle = routes[i]; // get current route for styling
-                        item.style.backgroundColor = isSelected ? (currentRouteForStyle.isDirectRoute ? '#e3f2fd' : '#e8f5e9') : '#f5f5f5';
-                        item.style.border = isSelected ? (currentRouteForStyle.isDirectRoute ? '2px solid #3498db' : '2px solid #2ecc71') : '1px solid #ddd';
-                        const textElement = item.querySelector('div > div:first-child');
-                        if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
-                    });
+	                    // Update UI for all route items (styling the selected item)
+	                    document.querySelectorAll('.route-selector .route-item').forEach((item, i) => {
+	                        const isSelected = (i === selectedIdx);
+	                        const currentRouteForStyle = routes[i]; // get current route for styling
+                            if (!currentRouteForStyle) return;
+	                        item.style.backgroundColor = isSelected ? getThemeColor('--route-selected-bg', '#fff7ed') : getThemeColor('--route-card-bg', '#f5f5f5');
+	                        item.style.border = isSelected ? `3px solid ${getRouteSelectedColor()}` : '1px solid #ddd';
+	                        const textElement = item.querySelector('div > div:first-child');
+	                        if (textElement) textElement.style.fontWeight = isSelected ? 'bold' : 'normal';
+	                    });
 
                     if (typeof Scores !== 'undefined' && Scores.extractScoreData) {
                         try {
@@ -1181,14 +1693,22 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                             );
     } catch (error) {
                             console.warn("[setupRouteControlPanel] Error extracting score data:", error);
-                        }
-                    }
+	                        }
+	                    }
+	                });
+
+                L.DomEvent.on(removeButton, 'click', function(e) {
+                    L.DomEvent.stop(e);
+                    removeRouteAtIndex(index);
                 });
 
-                L.DomEvent.on(routeItem, 'click', function (e) {
-                    if (e.target !== radio) {
-                        radio.checked = true;
-                        const changeEvent = new Event('change');
+	                L.DomEvent.on(routeItem, 'click', function (e) {
+                        if (e.target === removeButton || removeButton.contains(e.target)) {
+                            return;
+                        }
+	                    if (e.target !== radio) {
+	                        radio.checked = true;
+	                        const changeEvent = new Event('change');
                         radio.dispatchEvent(changeEvent);
                     }
                 });
@@ -1229,9 +1749,9 @@ async function route(
     currentRouting = {
         routingControl: null,
         routingControls: []
-    }, 
-    currentPreferences = MasterPreferences.DEFAULT, 
-    currentPatientCondition = MasterPatientCondition.DEFAULT, 
+    },
+    currentPreferences = MasterPreferences.DEFAULT,
+    currentPatientCondition = MasterPatientCondition.DEFAULT,
     waypointInputs = {
         start: {
             lat: 0,
@@ -1240,22 +1760,22 @@ async function route(
         end: {
             lat: 0,
             lon: 0
-        }}, 
+        }},
     additionalInfos = {
         transportMode: 'driving',
         percentageSlider: 1,
         preCalculatedRoutes: null // New parameter to accept pre-calculated routes from A*
-    }, 
-    map, 
+    },
+    map,
     document,
     csvData) {
 
     console.log("[route] Function called. Condition:", currentPatientCondition ? currentPatientCondition.name : 'N/A', "Transport:", additionalInfos.transportMode);
-    
+
     // Check if we're using pre-calculated routes from A*
     if (additionalInfos.preCalculatedRoutes && Array.isArray(additionalInfos.preCalculatedRoutes)) {
         console.log(`[route] Using ${additionalInfos.preCalculatedRoutes.length} pre-calculated routes from A* algorithm`);
-        
+
         // Use the pre-calculated routes instead of generating new ones
         return routeWithPrecalculatedRoutes(
             currentRouting,
@@ -1268,7 +1788,7 @@ async function route(
             csvData
         );
     }
-    
+
     // Ensure we're using the global csvData
     if (!csvData && window.csvData) {
         console.log("[route] Using global window.csvData since no csvData was provided");
@@ -1303,7 +1823,7 @@ async function route(
                 console.warn(`[handleOnRouteFound] No route data in event for ${createdRoute.routeName}`);
                 return;
             }
-    
+
             createdRoute.route = routePath;
             createdRoute.length = routePath.summary ? routePath.summary.totalDistance : null;
             createdRoute.duration = routePath.summary ? routePath.summary.totalTime : null;
@@ -1324,36 +1844,36 @@ async function route(
             console.log(`[handleOnRouteFound] Fetching environmental data for ${createdRoute.routeName}`);
             window.useRealTimeData = true; // Force real-time data usage
             window.REAL_DATA_ONLY = true; // Force real data only
-            
+
             // Clear any global environmental cache to ensure fresh data
             if (window.dataCache) {
                 console.log("[handleOnRouteFound] Clearing global environmental data cache to get fresh data");
                 window.dataCache = {};
             }
-            
+
             // Implement improved retry logic for environmental data
             let environmentDataList = [];
             let retryCount = 0;
             const maxRetries = 5; // Increased retries
             let hasEnoughRealData = false;
-            
+
             while (retryCount < maxRetries && !hasEnoughRealData) {
                 try {
                     // Force refresh on retries
                     const forceRefresh = retryCount > 0;
                     environmentDataList = await Environmental.getRouteEnvironmentalData(routePath, currentPatientCondition, forceRefresh);
-                    
+
                     // Check if we have enough real API data
                     if (environmentDataList && environmentDataList.length > 0) {
                         // Track real data vs simulated data
                         let realDataPoints = 0;
                         let totalDataPoints = 0;
-                        
+
                         environmentDataList.forEach(point => {
                             if (point.temperature !== null) totalDataPoints++;
                             if (point.airQuality !== null) totalDataPoints++;
                             if (point.slope !== null) totalDataPoints++;
-                            
+
                             // Count as real data if not marked as default, synthetic, or enhanced
                             if (point.temperature !== null && !point.isDefault && !point.isSynthetic && !point.isEnhanced) {
                                 realDataPoints++;
@@ -1365,10 +1885,10 @@ async function route(
                                 realDataPoints++;
                             }
                         });
-                        
+
                         const realDataRatio = totalDataPoints > 0 ? realDataPoints / totalDataPoints : 0;
                         console.log(`[handleOnRouteFound] Real data percentage: ${(realDataRatio * 100).toFixed(1)}% (${realDataPoints}/${totalDataPoints} data points)`);
-                        
+
                         // If we have at least 50% real data, consider it good enough
                         if (realDataRatio >= 0.5) {
                             hasEnoughRealData = true;
@@ -1404,7 +1924,7 @@ async function route(
                     }
                 }
             }
-            
+
             // Store environmental data in route object
             // Ensure the structure matches what getEnvironmentalData returns, including top-level flags
             createdRoute.environmentDataList = environmentDataList.map(envDataPoint => {
@@ -1432,7 +1952,7 @@ async function route(
             // Calculate scores - using the renamed function to avoid duplicate declaration issue
             console.log(`[handleOnRouteFound] Calculating scores for ${createdRoute.routeName}`);
             const mappedEnvData = mapEnvironmentalDataToCoordinates(environmentDataList, createdRoute.coordinates);
-            
+
             let scoreDataResult; // Renamed to avoid conflict with createdRoute.scoreData if it exists
             try {
                 scoreDataResult = await Scores.calculateAllScores(
@@ -1441,7 +1961,7 @@ async function route(
                     currentPreferences,
                     currentPatientCondition
                 );
-                
+
                 console.log(`[handleOnRouteFound] Score calculation result for ${createdRoute.routeName}:`, JSON.stringify(scoreDataResult, null, 2));
                 if (scoreDataResult.realDataPercentage) {
                     console.log(`[handleOnRouteFound] Score calculation used ${scoreDataResult.realDataPercentage.toFixed(1)}% real data`);
@@ -1467,15 +1987,15 @@ async function route(
                 createdRoute.specializedPoiScore = scoreDataResult.specializedPoiScore;
                 createdRoute.realDataPercentage = scoreDataResult.realDataPercentage;
                 // Pass along the detailed envStats from calculateAllScores for extractScoreData
-                createdRoute.envStats = scoreDataResult.envStats; 
+                createdRoute.envStats = scoreDataResult.envStats;
             }
-            
+
             // Ensure the score is not zero or undefined - if so, give it a default value (should be less necessary now)
             if (typeof createdRoute.score !== 'number' || Number.isNaN(createdRoute.score)) createdRoute.score = 5.0;
             if (typeof createdRoute.environmentScore !== 'number' || Number.isNaN(createdRoute.environmentScore)) createdRoute.environmentScore = 5.0;
             if (typeof createdRoute.poiScore !== 'number' || Number.isNaN(createdRoute.poiScore)) createdRoute.poiScore = 5.0;
             if (typeof createdRoute.specializedPoiScore !== 'number' || Number.isNaN(createdRoute.specializedPoiScore)) createdRoute.specializedPoiScore = 0.0;
-            
+
             console.log(`[handleOnRouteFound] Final scores assigned to ${createdRoute.routeName}: Total=${createdRoute.score}, Env=${createdRoute.environmentScore}, POI=${createdRoute.poiScore}, Specialized=${createdRoute.specializedPoiScore}, RealData=${createdRoute.realDataPercentage}%`);
 
             // Update the route in allRoutes array
@@ -1486,12 +2006,13 @@ async function route(
                  allRoutes.push(createdRoute);
             }
 
-            // If all routes have been processed, select the best and create control panel
-            if (allRoutes.length >= numberOfRoutes) {
-                // Select the best route
-                currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
-                
-                // Add route data to CSV collection
+	            // If all routes have been processed, select the best and create control panel
+	            if (allRoutes.length >= numberOfRoutes) {
+                    deduplicateRoutesForComparison(allRoutes, map, currentRouting);
+	                // Select the best route
+	                currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
+
+	                // Add route data to CSV collection
                 allRoutes.forEach((route, index) => {
                     // Ensure route has startPoint and endPoint
                     if (!route.startPoint) {
@@ -1500,71 +2021,43 @@ async function route(
                     if (!route.endPoint) {
                         route.endPoint = waypointInputs.end;
                     }
-                    
+
                     // Collect analytics data for CSV export
                     const routeExportData = collectRouteAnalyticsData(
                         route,
                         currentPatientCondition,
                         currentPreferences,
                         index
-                    );
-                    
-                    // Add to csvData if it exists
-                    if (csvData && Array.isArray(csvData)) {
-                        console.log(`[handleOnRouteFound] Adding route to csvData: ${routeExportData.path_type} for ${routeExportData.patient_condition}`);
-                        
-                        // Check if this route is already in csvData
-                        const routeExists = csvData.some(r => 
-                            r.path_type === routeExportData.path_type && 
-                            r.patient_condition === routeExportData.patient_condition &&
-                            Math.abs(r.start_lat - routeExportData.start_lat) < 0.0001 &&
-                            Math.abs(r.start_lon - routeExportData.start_lon) < 0.0001 &&
-                            Math.abs(r.end_lat - routeExportData.end_lat) < 0.0001 &&
-                            Math.abs(r.end_lon - routeExportData.end_lon) < 0.0001
-                        );
-                        
-                        if (!routeExists) {
-                            // Directly use window.csvData to ensure we're modifying the global array
-                            if (window.csvData) {
-                                window.csvData.push(routeExportData);
-                                console.log(`[handleOnRouteFound] Added route ${routeExportData.path_type} for ${routeExportData.patient_condition} to global csvData. Count: ${window.csvData.length}`);
-                            } else {
-                                csvData.push(routeExportData);
-                                console.log(`[handleOnRouteFound] Added route ${routeExportData.path_type} for ${routeExportData.patient_condition} to local csvData. Count: ${csvData.length}`);
-                            }
-                        } else {
-                            console.log(`[handleOnRouteFound] Route ${routeExportData.path_type} for ${routeExportData.patient_condition} already exists in csvData.`);
-                        }
-                    } else {
-                        console.warn("[handleOnRouteFound] csvData is not available or not an array:", csvData);
-                    }
-                });
-                
+	                    );
+
+                        addRouteDataToCsv(routeExportData, csvData, 'handleOnRouteFound');
+	                });
+
                 // Show notification that routes are ready for download
                 toastr.success(`${allRoutes.length} routes collected for ${currentPatientCondition.name} condition. Click Download to export.`);
-                
+
                 // Update download button if function exists
                 if (typeof window.updateDownloadButtonText === 'function') {
                     window.updateDownloadButtonText();
                 }
-                
-                // Set up the route control panel
-                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
-            }
+
+	                // Set up the route control panel
+	                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+	            }
         } catch (error) {
             console.error(`[handleOnRouteFound] Error processing route ${createdRoute.routeName}:`, error);
             // Still add the route with default values
             createdRoute.score = 5.0;
             createdRoute.environmentScore = 5.0;
             createdRoute.poiScore = 5.0;
-            
+
             const existingRouteIndex = allRoutes.findIndex(r => r.routingControl === createdRoute.routingControl);
             if (existingRouteIndex === -1) {
                 allRoutes.push(createdRoute);
             }
         }
     }
-    
+
     // Select the best route based on scores
     function selectBestRoute(routes, condition) {
         // Ensure all routes have valid scores
@@ -1573,32 +2066,32 @@ async function route(
                 route.score = 5.0; // Default score if undefined
             }
         });
-        
+
         // Get the route with the highest score
         let bestRoute = routes[0];
         for (let i = 1; i < routes.length; i++) {
             // Safely compare scores, handling potential undefined values
             const currentScore = parseFloat(routes[i].score) || 0;
             const bestScore = parseFloat(bestRoute.score) || 0;
-            
+
             if (currentScore > bestScore) {
                 bestRoute = routes[i];
             }
         }
-        
+
         console.log(`[selectBestRoute] Selected best route: ${bestRoute.routeName}, Score: ${bestRoute.score}`);
         return bestRoute;
     }
 
     try { // TOP-LEVEL TRY BLOCK FOR THE ENTIRE ROUTE FUNCTION
-        
+
         // Initializations and Validations
         if (GenericUtils.checkIfAnyNaN(
             waypointInputs.start.lat, waypointInputs.start.lon,
             waypointInputs.end.lat, waypointInputs.end.lon
         )) {
             toastr.error("Invalid start or end point coordinates.");
-            return; 
+            return;
         }
 
         startLat = parseFloat(waypointInputs.start.lat);
@@ -1624,7 +2117,7 @@ async function route(
         if (window.routeControlPanel) {
             try { map.removeControl(window.routeControlPanel); window.routeControlPanel = null; } catch (e) { console.warn("Error removing panel");}
         }
-        if (window.routeInfoLabels) { 
+        if (window.routeInfoLabels) {
             window.routeInfoLabels.forEach(l => { if (l && l._map) map.removeLayer(l); });
             window.routeInfoLabels = [];
         }
@@ -1638,9 +2131,9 @@ async function route(
 
             if (currentPatientCondition.isPatientMode) {
                 console.log(`[route-async-block] Generating alternative routes for ${currentPatientCondition.name} condition`);
-                numberOfRoutes = Math.min(3, numberOfRoutes); 
+                numberOfRoutes = Math.min(3, numberOfRoutes);
             } else {
-                numberOfRoutes = Math.min(2, numberOfRoutes); 
+                numberOfRoutes = Math.min(2, numberOfRoutes);
             }
             toastr.info(`Calculating optimal ${currentPatientCondition.name} route...`);
 
@@ -1658,23 +2151,27 @@ async function route(
 
                 // Direct Route Promise
                 routePromises.push(new Promise(async (resolveRoutePromise) => {
-                    const directRouteControl = L.Routing.control({ 
-                        waypoints, 
-                        router: createMapboxRouter('walking'), 
-                        createMarker: function() { return null; } 
-                    });
-                    
+	                    const directRouteControl = L.Routing.control({
+	                        waypoints,
+	                        router: createMapboxRouter('walking'),
+	                        createMarker: function() { return null; },
+                            lineOptions: {
+                                styles: getRouteLineStyles({ isDirectRoute: true }, false),
+                                missingRouteTolerance: 100
+                            }
+	                    });
+
                     // Explicitly add to map first
                     directRouteControl.addTo(map);
                     currentRouting.routingControls.push(directRouteControl);
-                    
+
                     directRouteControl.on('routesfound', (e) => {
                         console.log("[route-async-block] Direct route found.");
-                        const createdRoute = { 
-                            routeName: "Direct Route", 
+                        const createdRoute = {
+                            routeName: "Direct Route",
                             isDirectRoute: true, // Mark as direct
-                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
-                            routingControl: directRouteControl 
+                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
+                            routingControl: directRouteControl
                         };
                         handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
                         resolveRoutePromise(true);
@@ -1689,27 +2186,28 @@ async function route(
                     routePromises.push(new Promise(async (resolveRoutePromise) => {
                         const pattern = routePatterns[i];
                         const altRouteWaypointsForControl = pattern.waypoints.map(wp => L.latLng(wp.lat, wp.lon));
-                        
+
                         const altRouteControl = L.Routing.control({
-                            waypoints: altRouteWaypointsForControl, 
-                            router: createMapboxRouter('walking'), 
-                            createMarker: function() { return null; },
-                            lineOptions: {
-                                styles: [{ color: '#e74c3c', opacity: 0.7, weight: 4 }]
-                            }
-                        });
-                        
+                            waypoints: altRouteWaypointsForControl,
+                            router: createMapboxRouter('walking'),
+	                            createMarker: function() { return null; },
+	                            lineOptions: {
+	                                styles: getRouteLineStyles({ isDirectRoute: false }, false),
+                                    missingRouteTolerance: 100
+	                            }
+	                        });
+
                         // Explicitly add to map first
                         altRouteControl.addTo(map);
                         currentRouting.routingControls.push(altRouteControl);
-                        
+
                         altRouteControl.on('routesfound', (e) => {
                             console.log(`[route-async-block] Alt route ${pattern.name} found.`);
-                            const createdRoute = { 
-                                routeName: pattern.name, 
+                            const createdRoute = {
+                                routeName: pattern.name,
                                 isDirectRoute: false, // Mark as not direct
-                                ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
-                                routingControl: altRouteControl 
+                                ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
+                                routingControl: altRouteControl
                             };
                             handleOnRouteFound(e, altRouteControl, createdRoute, altRouteWaypointsForControl); // Pass 'altRouteWaypointsForControl'
                             resolveRoutePromise(true);
@@ -1721,35 +2219,36 @@ async function route(
 
             } else { // Non-patient mode
                 routePromises.push(new Promise((resolveRoutePromise) => {
-                    const directRouteControl = L.Routing.control({ 
-                        waypoints, 
-                        router: createMapboxRouter(additionalInfos.transportMode || 'walking'), 
-                        createMarker: function() { return null; },
-                        lineOptions: {
-                            styles: [{ color: '#3498db', opacity: 0.8, weight: 5 }]
-                        }
-                    });
-                    
+                    const directRouteControl = L.Routing.control({
+                        waypoints,
+                        router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
+	                        createMarker: function() { return null; },
+	                        lineOptions: {
+	                            styles: getRouteLineStyles({ isDirectRoute: true }, false),
+                                missingRouteTolerance: 100
+	                        }
+	                    });
+
                     directRouteControl.addTo(map);
                     currentRouting.routingControls.push(directRouteControl);
-                    
+
                     directRouteControl.on('routesfound', async (e) => {
                         console.log("[route-async-block] Non-patient direct route found.");
-                        const createdRoute = { 
-                            routeName: "Direct Route", 
+                        const createdRoute = {
+                            routeName: "Direct Route",
                             isDirectRoute: true, // Mark as direct
-                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end), 
-                            routingControl: directRouteControl 
+                            ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
+                            routingControl: directRouteControl
                         };
                         await handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
                         resolveRoutePromise(true);
                     });
-                    
-                    directRouteControl.on('routingerror', (e) => { 
+
+                    directRouteControl.on('routingerror', (e) => {
                         console.error("Non-patient direct route error:", e);
                         resolveRoutePromise(false);
                     });
-                    
+
                     directRouteControl.route();
                 }));
             }
@@ -1757,13 +2256,14 @@ async function route(
             await Promise.all(routePromises);
             console.log("[route-async-block] All route generation promises resolved. Total routes in allRoutes after processing:", allRoutes.length);
 
-            if (allRoutes.length === 0) {
-                console.warn("[route-async-block] No valid routes were created (allRoutes is empty).");
-                throw new Error("No routes generated by async block and processed by handleOnRouteFound.");
-            }
+	            if (allRoutes.length === 0) {
+	                console.warn("[route-async-block] No valid routes were created (allRoutes is empty).");
+	                throw new Error("No routes generated by async block and processed by handleOnRouteFound.");
+	            }
 
-            currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
-            if (!currentRoute) {
+                deduplicateRoutesForComparison(allRoutes, map, currentRouting);
+	            currentRoute = selectBestRoute(allRoutes, currentPatientCondition);
+	            if (!currentRoute) {
                 console.warn("[route-async-block] selectBestRoute did not return a valid route. Using first available from allRoutes.");
                 currentRoute = allRoutes.length > 0 ? allRoutes[0] : null;
                 if (!currentRoute) {
@@ -1771,47 +2271,41 @@ async function route(
                     throw new Error("No best route selectable and allRoutes is empty after selection attempt.");
                 }
             }
-            
+
             console.log("[route-async-block] Best route selected:", currentRoute.routeName, "Score:", currentRoute.score);
-            
+
             // Display routes in UI instead of calling the problematic displayBestRoute function
             showBestRoute();
-            
+
             // A local function to show the best route
             function showBestRoute() {
                 console.log(`[route] Displaying ${allRoutes.length} routes with best route: ${currentRoute?.routeName || 'Unknown'}`);
-                
+
                 // Apply styling to each route but don't control visibility here
                 // (visibility will be managed by setupRouteControlPanel radio buttons)
-                allRoutes.forEach(route => {
-                    if (route.routingControl) {
-                        const isBest = (route === currentRoute);
-                        
-                        // Set styling based on whether it's the best route
-                        const routeColor = isBest ? '#2ecc71' : '#3498db'; // Green for best, blue for alternatives
-                        const routeWeight = isBest ? 6 : 4;
-                        const routeOpacity = isBest ? 0.9 : 0.7;
-                        
-                        try {
-                            // Set line style only - don't control visibility here
-                            if (route.routingControl._container) {
-                                route.routingControl.options.lineOptions = {
-                                    styles: [{ color: routeColor, opacity: routeOpacity, weight: routeWeight }]
-                                };
-                                
-                                // Don't hide/show containers here - let radio buttons handle this
-                                // The setupRouteControlPanel will manage visibility
+	                allRoutes.forEach(route => {
+	                    if (route.routingControl) {
+	                        const isBest = (route === currentRoute);
+                            route.isBest = isBest;
+
+	                        try {
+	                            // Set line style only - don't control visibility here
+	                            if (route.routingControl._container) {
+                                    syncRoutingControlLineOptions(route, isBest);
+
+	                                // Don't hide/show containers here - let radio buttons handle this
+	                                // The setupRouteControlPanel will manage visibility
                             }
                         } catch (error) {
                             console.error(`[route] Error styling route: ${error.message}`);
                         }
                     }
                 });
-                
-                // Let the setupRouteControlPanel function handle the control panel creation
-                // and route visibility management
-                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
-                
+
+	                // Let the setupRouteControlPanel function handle the control panel creation
+	                // and route visibility management
+	                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+
                 // Hide loading screen immediately after routes are displayed
                 LoadingScreen.hide(document);
                 console.log("[route] LoadingScreen hidden after setupRouteControlPanel");
@@ -1826,7 +2320,7 @@ async function route(
 
     } catch (errorInMainRouteFunction) { // Catches errors from the main setup, or if rethrown from async block
         console.error("[route] Error in main function execution (outside async block):", errorInMainRouteFunction);
-        displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon); 
+        displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
     } finally { // TOP-LEVEL FINALLY BLOCK
         LoadingScreen.hide(document); // Always hide loading screen
         if (Environmental.finalizeRouteCalculation) {
@@ -1835,21 +2329,22 @@ async function route(
         } else {
             console.warn("[route] Environmental.finalizeRouteCalculation is not defined in main finally block!");
         }
-        
+
         // CRITICAL FIX: Ensure routes are always added to csvData
         console.log("[route] Adding routes to csvData in finally block, routes count:", allRoutes.length);
-        
-        // Force direct addition to window.csvData to guarantee it works
-        if (allRoutes && allRoutes.length > 0) {
-            if (!window.csvData) {
-                window.csvData = [];
-            }
-            
-            // Add each route directly to window.csvData
-                            allRoutes.forEach((route, index) => {
-                if (!route.startPoint) route.startPoint = waypointInputs.start;
-                if (!route.endPoint) route.endPoint = waypointInputs.end;
-                
+
+	        // Force direct addition to window.csvData to guarantee it works
+	        if (allRoutes && allRoutes.length > 0) {
+	            if (!window.csvData) {
+	                window.csvData = [];
+	            }
+                deduplicateRoutesForComparison(allRoutes, map, currentRouting);
+
+	            // Add each route directly to window.csvData
+	            allRoutes.forEach((route, index) => {
+	                if (!route.startPoint) route.startPoint = waypointInputs.start;
+	                if (!route.endPoint) route.endPoint = waypointInputs.end;
+
                 // Generate route data
                 const routeData = collectRouteAnalyticsData(
                     {
@@ -1860,25 +2355,15 @@ async function route(
                     },
                     currentPatientCondition,
                     currentPreferences,
-                    index
-                );
-                
-                // Simpler duplicate check
-                const isDuplicate = window.csvData.some(existingRoute => 
-                    existingRoute.path_type === routeData.path_type && 
-                    existingRoute.patient_condition === routeData.patient_condition &&
-                    Math.abs(existingRoute.start_lat - routeData.start_lat) < 0.0001
-                );
-                
-                if (!isDuplicate) {
-                    window.csvData.push(routeData);
-                    console.log(`[route] Force-added route ${routeData.path_type} to csvData. New length: ${window.csvData.length}`);
-                }
-            });
-            
+	                    index
+	                );
+
+                    addRouteDataToCsv(routeData, window.csvData, 'route');
+	            });
+
             // Show a notification
             toastr.success(`${allRoutes.length} routes collected. Total in CSV: ${window.csvData.length}`);
-            
+
             // Update the download button
             if (typeof window.updateDownloadButtonText === 'function') {
                 window.updateDownloadButtonText();
@@ -1886,7 +2371,7 @@ async function route(
         } else {
             console.warn("[route] No routes available to add to csvData in finally block");
         }
-        
+
         console.log("[route] Main route function execution complete (including finally block).");
     }
 }
@@ -1923,11 +2408,11 @@ async function routeWithPrecalculatedRoutes(
 ) {
     try {
         console.log("[routeWithPrecalculatedRoutes] Processing pre-calculated routes. Condition:", currentPatientCondition ? currentPatientCondition.name : 'N/A');
-        
+
         if (Environmental.startRouteCalculation) {
             Environmental.startRouteCalculation();
         }
-        
+
         // Clear existing routes first
         if (currentRouting.routingControls && Array.isArray(currentRouting.routingControls)) {
             currentRouting.routingControls.forEach(control => {
@@ -1937,49 +2422,47 @@ async function routeWithPrecalculatedRoutes(
             });
             currentRouting.routingControls = [];
         }
-        
+
         const preCalculatedRoutes = additionalInfos.preCalculatedRoutes;
         const allRoutes = [];
-        
+
         console.log(`[routeWithPrecalculatedRoutes] Processing ${preCalculatedRoutes.length} pre-calculated routes`);
-        
+
         // Create Leaflet routing controls for each pre-calculated route
         for (let i = 0; i < preCalculatedRoutes.length; i++) {
             const route = preCalculatedRoutes[i];
-            
+
             console.log(`[routeWithPrecalculatedRoutes] Processing route ${i+1}: ${route.name}`);
-            
+
             // Create waypoints from route data
             const waypoints = route.waypoints.map(wp => L.latLng(wp.lat, wp.lon));
-            
-            // Create routing control
-            const routeColor = i === 0 ? '#2ecc71' : '#3498db'; // Green for best, blue for alternatives
-            const routeWeight = i === 0 ? 6 : 4;
-            const routeOpacity = i === 0 ? 0.9 : 0.7;
-            
-            const routingControl = L.Routing.control({
-                waypoints: waypoints,
-                routeWhileDragging: false,
-                fitSelectedRoutes: true,
-                showAlternatives: false,
-                lineOptions: {
-                    styles: [{ color: routeColor, opacity: routeOpacity, weight: routeWeight }],
-                    missingRouteTolerance: 100
-                },
+
+	            // Create routing control
+                const initialRouteStyle = getRouteLineStyles({ isDirectRoute: false }, i === 0);
+
+	            const routingControl = L.Routing.control({
+	                waypoints: waypoints,
+	                routeWhileDragging: false,
+	                fitSelectedRoutes: true,
+	                showAlternatives: false,
+	                lineOptions: {
+	                    styles: initialRouteStyle,
+	                    missingRouteTolerance: 100
+	                },
                 router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
                 createMarker: function() { return null; }
             });
-            
+
             // DO NOT add to map here. setupRouteControlPanel will handle it.
             // DO NOT push to currentRouting.routingControls here. setupRouteControlPanel will handle it.
-            
+
             // Generate synthetic environmental data if not present
             let environmentDataList = [];
-            
+
             // If we're missing environmental data, create synthetic data
             if (!route.environmentDataList || route.environmentDataList.length === 0) {
                 console.log(`[routeWithPrecalculatedRoutes] Generating synthetic environmental data for route ${i+1}`);
-                
+
                 // Create synthetic environmental data for this route
                 environmentDataList = createLocationBasedEnvironmentalData(
                     route.coordinates || [
@@ -1993,21 +2476,21 @@ async function routeWithPrecalculatedRoutes(
                 environmentDataList = route.environmentDataList;
                 console.log(`[routeWithPrecalculatedRoutes] Using existing environmental data for route ${i+1}: ${environmentDataList.length} points`);
             }
-            
+
             // Normalize the environment score to a 0-10 scale
             // Default to 5.0 if score is invalid (Infinity, NaN, etc.)
             let normalizedScore = 5.0;
             const originalAStarCost = route.environmentalScore; // Preserve the raw A* cost
 
-            if (route.environmentalScore !== undefined && 
-                isFinite(route.environmentalScore) && 
+            if (route.environmentalScore !== undefined &&
+                isFinite(route.environmentalScore) &&
                 !isNaN(route.environmentalScore)) {
                 // Convert to a 0-10 scale where lower original score is better
                 normalizedScore = Math.max(0, Math.min(10, 10 - (route.environmentalScore / 50)));
         } else {
                 console.log(`[routeWithPrecalculatedRoutes] Invalid environmentalScore (${route.environmentalScore}), using default 5.0`);
             }
-            
+
             // Create route object with all data
             const routeObject = {
                 routeName: route.name || `Route ${i+1}`,
@@ -2031,7 +2514,7 @@ async function routeWithPrecalculatedRoutes(
                 isBest: i === 0, // Explicitly mark first route as best
                 removedFromMap: false // All routes will be on the map, styled by setupRouteControlPanel
             };
-            
+
             // Generate POI counts if missing
             if (!routeObject.poiCounts) {
                 routeObject.poiCounts = {
@@ -2045,7 +2528,7 @@ async function routeWithPrecalculatedRoutes(
                     flatPathwayCount: 1 + Math.floor(Math.random() * 3)
                 };
             }
-            
+
             // === Dynamic POI scoring ===
             try {
                 // Map env data to coordinate structure expected by the scoring util
@@ -2070,41 +2553,23 @@ async function routeWithPrecalculatedRoutes(
 
             // Store in array
             allRoutes.push(routeObject);
-            
-            // Add to CSV data
-            if (csvData && Array.isArray(csvData)) {
+
+	            // Add to CSV data
                 const routeExportData = collectRouteAnalyticsData(
                     routeObject,
                     currentPatientCondition,
                     currentPreferences,
                     i
                 );
-                
-                // Check if this route is already in csvData
-                const routeExists = csvData.some(r => 
-                    r.path_type === routeExportData.path_type && 
-                    r.patient_condition === routeExportData.patient_condition &&
-                    Math.abs(r.start_lat - routeExportData.start_lat) < 0.0001 &&
-                    Math.abs(r.start_lon - routeExportData.start_lon) < 0.0001 &&
-                    Math.abs(r.end_lat - routeExportData.end_lat) < 0.0001 &&
-                    Math.abs(r.end_lon - routeExportData.end_lon) < 0.0001
-                );
-                
-                if (!routeExists) {
-                    if (window.csvData) {
-                        window.csvData.push(routeExportData);
-                    } else if (csvData) {
-                        csvData.push(routeExportData);
-                    }
-                }
-            }
-        }
-        
-        console.log(`[routeWithPrecalculatedRoutes] Created ${allRoutes.length} routes, control panel setup will manage map addition.`);
-        
-        // Set up route control panel
-        setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences);
-        
+                addRouteDataToCsv(routeExportData, csvData, 'routeWithPrecalculatedRoutes');
+	        }
+
+            deduplicateRoutesForComparison(allRoutes, map, currentRouting);
+	        console.log(`[routeWithPrecalculatedRoutes] Created ${allRoutes.length} routes, control panel setup will manage map addition.`);
+
+	        // Set up route control panel
+	        setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+
         toastr.success(`Generated ${allRoutes.length} routes using A* algorithm for ${currentPatientCondition.name} condition`);
         if (typeof window.updateDownloadButtonText === 'function') window.updateDownloadButtonText();
         return true;
@@ -2123,13 +2588,13 @@ function mapEnvironmentalDataToCoordinates(environmentDataList, coordinates) {
         console.warn("[mapEnvironmentalDataToCoordinates] Missing data, returning empty array");
         return [];
     }
-    
+
     return environmentDataList.map((env, index) => {
         // Find corresponding coordinate, using last point if we run out
-        const coordinate = index < coordinates.length ? 
-            coordinates[index] : 
+        const coordinate = index < coordinates.length ?
+            coordinates[index] :
             coordinates[coordinates.length - 1];
-            
+
         return {
             lat: coordinate?.lat || 0,
             lon: coordinate?.lng || 0,

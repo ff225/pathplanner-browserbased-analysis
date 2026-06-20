@@ -16,10 +16,12 @@
     overflow-x: hidden;
     overscroll-behavior: contain;
     color: var(--color-text);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-md);
+    background: var(--mac-window-bg, var(--color-surface));
+    border: 0.5px solid var(--mac-hairline, var(--color-border));
+    border-radius: var(--mac-radius-panel, var(--radius-md));
+    box-shadow: var(--mac-card-shadow, var(--shadow-md));
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
 }
 
 .suggestion-item {
@@ -27,12 +29,12 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    min-height: 44px;
+    min-height: 40px;
     padding: 8px 10px;
     cursor: pointer;
     background: transparent;
     border: 0;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 0.5px solid var(--mac-hairline, var(--color-border));
     font-size: 12.5px;
     line-height: 1.25;
     text-align: left;
@@ -41,7 +43,8 @@
 
 .suggestion-item:hover,
 .suggestion-item:focus {
-    background-color: var(--color-primary-soft);
+    background-color: var(--mac-panel-bg-hover, var(--color-primary-soft));
+    outline: none;
 }
 
 .suggestion-item:disabled {
@@ -85,7 +88,7 @@
 
 .main-text strong {
     font-weight: 700;
-    color: var(--color-navigation);
+    color: var(--mac-accent, var(--color-navigation));
 }
 
 .suggestions-container::-webkit-scrollbar {
@@ -93,11 +96,11 @@
 }
 
 .suggestions-container::-webkit-scrollbar-track {
-    background: var(--color-surface-soft);
+    background: transparent;
 }
 
 .suggestions-container::-webkit-scrollbar-thumb {
-    background: var(--color-border);
+    background: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
     border-radius: 999px;
 }
 

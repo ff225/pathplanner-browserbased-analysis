@@ -1,8 +1,42 @@
 body {
     margin: 0;
-    font-family: var(--font-sans);
+    --mac-font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    --mac-accent: #0a84ff;
+    --mac-accent-strong: #006bd6;
+    --mac-accent-soft: color-mix(in srgb, var(--mac-accent) 15%, transparent);
+    --mac-window-bg: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    --mac-window-bg-strong: color-mix(in srgb, var(--color-surface-soft) 82%, transparent);
+    --mac-panel-bg: color-mix(in srgb, var(--color-surface) 72%, transparent);
+    --mac-panel-bg-hover: color-mix(in srgb, var(--color-surface) 84%, var(--mac-accent) 5%);
+    --mac-control-bg: color-mix(in srgb, var(--color-surface) 92%, transparent);
+    --mac-muted-fill: color-mix(in srgb, var(--color-surface-muted) 70%, transparent);
+    --mac-hairline: color-mix(in srgb, var(--color-border) 72%, transparent);
+    --mac-focus-ring: color-mix(in srgb, var(--mac-accent) 30%, transparent);
+    --mac-sidebar-shadow: 18px 0 42px rgba(15, 31, 51, 0.14), 0 2px 12px rgba(15, 31, 51, 0.08);
+    --mac-card-shadow: 0 10px 24px rgba(15, 31, 51, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+    --mac-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 1px 2px rgba(15, 31, 51, 0.05);
+    --mac-radius-control: 10px;
+    --mac-radius-panel: 12px;
+    font-family: var(--mac-font-sans);
     background: var(--color-page);
     color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        --mac-window-bg: color-mix(in srgb, var(--color-surface) 78%, transparent);
+        --mac-window-bg-strong: color-mix(in srgb, var(--color-surface-soft) 70%, transparent);
+        --mac-panel-bg: color-mix(in srgb, var(--color-surface-soft) 68%, transparent);
+        --mac-panel-bg-hover: color-mix(in srgb, var(--color-surface-soft) 78%, var(--mac-accent) 7%);
+        --mac-control-bg: color-mix(in srgb, var(--color-surface) 86%, transparent);
+        --mac-muted-fill: color-mix(in srgb, var(--color-surface-muted) 76%, transparent);
+        --mac-hairline: color-mix(in srgb, var(--color-border) 76%, transparent);
+        --mac-sidebar-shadow: 18px 0 46px rgba(0, 0, 0, 0.32), 0 2px 12px rgba(0, 0, 0, 0.24);
+        --mac-card-shadow: 0 12px 26px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        --mac-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 1px 2px rgba(0, 0, 0, 0.16);
+    }
 }
 
 .map-shell,
@@ -41,11 +75,13 @@ body {
     justify-content: center;
     width: 42px;
     height: 42px;
-    color: var(--color-primary);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-md);
+    color: var(--mac-accent);
+    background: var(--mac-window-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-panel);
+    box-shadow: var(--mac-card-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(22px);
+    backdrop-filter: saturate(180%) blur(22px);
     cursor: pointer;
     transition:
         left 0.28s ease,
@@ -59,12 +95,12 @@ body {
 .sidebar-toggle:hover,
 .sidebar-toggle:focus {
     color: var(--color-on-primary);
-    background: var(--color-primary);
-    border-color: var(--color-primary);
+    background: var(--mac-accent);
+    border-color: var(--mac-accent);
 }
 
 .sidebar-toggle:focus-visible {
-    outline: 3px solid var(--color-primary-soft);
+    outline: 3px solid var(--mac-focus-ring);
     outline-offset: 3px;
 }
 
@@ -97,13 +133,14 @@ body {
     height: 100vh;
     overflow-y: auto;
     min-width: 0;
-    font-size: 0.92rem;
+    font-size: 0.875rem;
     background:
-        linear-gradient(180deg, rgba(20, 184, 166, 0.12) 0%, rgba(37, 99, 235, 0) 32%),
-        linear-gradient(180deg, var(--color-sidebar) 0%, var(--color-sidebar-strong) 100%);
-    color: var(--color-sidebar-text);
-    border-right: 1px solid var(--color-sidebar-border);
-    box-shadow: var(--shadow-md);
+        linear-gradient(180deg, var(--mac-window-bg) 0%, var(--mac-window-bg-strong) 100%);
+    color: var(--color-text);
+    border-right: 0.5px solid var(--mac-hairline);
+    box-shadow: var(--mac-sidebar-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(26px);
+    backdrop-filter: saturate(180%) blur(26px);
     transition:
         flex-basis 0.28s ease,
         max-width 0.28s ease,
@@ -151,15 +188,15 @@ body {
 }
 
 .sidebar::-webkit-scrollbar {
-    width: 10px;
+    width: 8px;
 }
 
 .sidebar::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.04);
+    background: transparent;
 }
 
 .sidebar::-webkit-scrollbar-thumb {
-    background: rgba(159, 179, 200, 0.45);
+    background: color-mix(in srgb, var(--color-text-muted) 32%, transparent);
     border-radius: 999px;
 }
 
@@ -167,17 +204,18 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    color: var(--color-sidebar-text);
+    color: var(--color-text);
     text-decoration: none;
 }
 
 .brand-lockup img {
     width: 42px;
     height: 42px;
-    border-radius: var(--radius-sm);
-    background: var(--color-surface);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-control);
+    background: var(--mac-control-bg);
     padding: 5px;
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--mac-control-shadow);
 }
 
 .brand-title {
@@ -192,20 +230,20 @@ body {
 .form-hint,
 .patient-helper,
 .user-caption {
-    color: var(--color-sidebar-muted);
+    color: var(--color-text-muted);
 }
 
 .brand-subtitle,
 .section-kicker {
     display: block;
     font-size: 0.68rem;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
     text-transform: uppercase;
 }
 
 .sidebar-divider {
-    margin: 18px 0;
-    border-color: var(--color-sidebar-border);
+    margin: 16px 0;
+    border-color: var(--mac-hairline);
     opacity: 1;
 }
 
@@ -219,19 +257,27 @@ body {
 .patient-card,
 .layer-block,
 .user-block {
-    background: rgba(255, 255, 255, 0.055);
-    border: 1px solid var(--color-sidebar-border);
-    border-radius: var(--radius-md);
-    padding: 13px;
+    position: relative;
+    background: var(--mac-panel-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-panel);
+    box-shadow: var(--mac-card-shadow);
+    padding: 12px;
+    -webkit-backdrop-filter: saturate(160%) blur(14px);
+    backdrop-filter: saturate(160%) blur(14px);
+}
+
+.control-block:focus-within {
+    z-index: 30;
 }
 
 .control-block label,
 .patient-title,
 .layer-label {
-    margin-bottom: 7px;
-    color: var(--color-sidebar-text);
-    font-size: 0.84rem;
-    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--color-text);
+    font-size: 0.8rem;
+    font-weight: 650;
 }
 
 .form-hint,
@@ -254,7 +300,7 @@ body {
     margin: 12px auto 2px;
     padding: 0;
     column-gap: 7px;
-    color: var(--color-sidebar-muted);
+    color: var(--color-text-muted);
     text-align: center;
 }
 
@@ -262,14 +308,31 @@ body {
     float: none;
     justify-self: end;
     margin: 0;
+    width: 32px;
+    height: 18px;
+    background-color: var(--mac-muted-fill);
+    background-image: radial-gradient(circle at 5px 50%, #ffffff 0 5px, transparent 5.5px);
+    background-position: left center;
+    background-repeat: no-repeat;
+    background-size: 18px 18px;
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: 999px;
+    box-shadow: inset 0 1px 2px rgba(15, 31, 51, 0.1);
+    transition: background-color 0.18s ease, background-position 0.18s ease, border-color 0.18s ease;
+}
+
+.routing-mode-caption .form-check-input:checked {
+    background-color: var(--mac-accent);
+    background-position: right center;
+    border-color: color-mix(in srgb, var(--mac-accent) 70%, var(--color-border));
 }
 
 .routing-mode-caption .routing-mode-caption-label {
     justify-self: center;
     margin: 0;
-    color: var(--color-sidebar-text);
-    font-size: 0.72rem;
-    font-weight: 650;
+    color: var(--color-text);
+    font-size: 0.7rem;
+    font-weight: 600;
     line-height: 1.25;
     text-align: center;
 }
@@ -277,8 +340,8 @@ body {
 .routing-mode-caption-help {
     justify-self: start;
     margin: 0;
-    color: var(--color-primary);
-    background: var(--color-primary-soft);
+    color: var(--mac-accent);
+    background: var(--mac-accent-soft);
     font-size: 0.64rem;
     line-height: 1;
 }
@@ -286,11 +349,12 @@ body {
 .form-control,
 .form-select {
     color: var(--color-text);
-    background-color: var(--color-surface);
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    min-height: 42px;
-    box-shadow: none;
+    background-color: var(--mac-control-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-control);
+    min-height: 38px;
+    box-shadow: var(--mac-control-shadow);
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
 }
 
 .sidebar .form-control,
@@ -305,27 +369,30 @@ body {
 
 .form-control:focus,
 .form-select:focus {
-    border-color: var(--color-clinical);
-    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
+    border-color: var(--mac-accent);
+    box-shadow: 0 0 0 3px var(--mac-focus-ring), var(--mac-control-shadow);
 }
 
 .input-group .form-control {
-    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+    border-right: 0;
+    border-radius: var(--mac-radius-control) 0 0 var(--mac-radius-control);
 }
 
 .location-btn {
-    width: 44px;
-    color: var(--color-primary);
-    background: var(--color-primary-soft);
-    border-color: transparent;
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    width: 40px;
+    color: var(--mac-accent);
+    background: var(--mac-muted-fill);
+    border: 0.5px solid var(--mac-hairline);
+    border-left: 0;
+    border-radius: 0 var(--mac-radius-control) var(--mac-radius-control) 0;
+    box-shadow: var(--mac-control-shadow);
 }
 
 .location-btn:hover,
 .location-btn:focus {
     color: var(--color-on-primary);
-    background: var(--color-primary);
-    border-color: var(--color-primary);
+    background: var(--mac-accent);
+    border-color: var(--mac-accent);
 }
 
 .slider-label-row {
@@ -342,8 +409,8 @@ body {
     min-width: 46px;
     padding: 4px 8px;
     border-radius: 999px;
-    color: var(--color-primary-soft-text);
-    background: rgba(20, 184, 166, 0.18);
+    color: var(--mac-accent);
+    background: var(--mac-accent-soft);
     font-size: 0.76rem;
     font-weight: 700;
 }
@@ -352,8 +419,8 @@ input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
     width: 100%;
-    height: 8px;
-    background: linear-gradient(90deg, var(--color-clinical), var(--color-navigation));
+    height: 6px;
+    background: linear-gradient(90deg, var(--mac-accent), color-mix(in srgb, var(--mac-accent) 22%, var(--mac-muted-fill)));
     border-radius: 999px;
     outline: none;
 }
@@ -361,30 +428,30 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     background: var(--color-control-thumb);
-    border: 5px solid var(--color-navigation);
+    border: 3px solid var(--color-control-thumb);
     border-radius: 50%;
     cursor: pointer;
-    box-shadow: var(--shadow-sm);
+    box-shadow: 0 2px 8px rgba(15, 31, 51, 0.22), 0 0 0 1px var(--mac-hairline);
 }
 
 input[type="range"]::-moz-range-thumb {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     background: var(--color-control-thumb);
-    border: 5px solid var(--color-navigation);
+    border: 3px solid var(--color-control-thumb);
     border-radius: 50%;
     cursor: pointer;
-    box-shadow: var(--shadow-sm);
+    box-shadow: 0 2px 8px rgba(15, 31, 51, 0.22), 0 0 0 1px var(--mac-hairline);
 }
 
 .patient-card {
     background:
-        linear-gradient(135deg, rgba(20, 184, 166, 0.18), rgba(37, 99, 235, 0.08)),
-        rgba(255, 255, 255, 0.065);
-    border-left: 4px solid var(--color-clinical);
+        linear-gradient(135deg, var(--mac-accent-soft), transparent 70%),
+        var(--mac-panel-bg);
+    box-shadow: inset 3px 0 0 var(--mac-accent), var(--mac-card-shadow);
 }
 
 .patient-title {
@@ -412,16 +479,18 @@ input[type="range"]::-moz-range-thumb {
     align-items: center;
     justify-content: center;
     gap: 8px;
-    min-height: 44px;
-    border-radius: var(--radius-sm);
-    font-weight: 750;
+    min-height: 40px;
+    border-radius: var(--mac-radius-control);
+    font-weight: 650;
+    box-shadow: var(--mac-control-shadow);
+    transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
 .btn-route-primary,
 #searchButton {
     color: var(--color-on-primary);
-    background: var(--color-primary);
-    border-color: var(--color-primary);
+    background: var(--mac-accent);
+    border-color: color-mix(in srgb, var(--mac-accent) 78%, #000000);
 }
 
 .btn-route-primary:hover,
@@ -429,15 +498,16 @@ input[type="range"]::-moz-range-thumb {
 #searchButton:hover,
 #searchButton:focus {
     color: var(--color-on-primary);
-    background: var(--color-primary-strong);
-    border-color: var(--color-primary-strong);
+    background: var(--mac-accent-strong);
+    border-color: var(--mac-accent-strong);
+    box-shadow: 0 8px 18px color-mix(in srgb, var(--mac-accent) 24%, transparent);
 }
 
 .btn-route-muted,
 #cancelButton {
-    color: var(--color-sidebar-text);
-    background: rgba(255, 255, 255, 0.08);
-    border-color: var(--color-sidebar-border);
+    color: var(--color-text);
+    background: var(--mac-muted-fill);
+    border-color: var(--mac-hairline);
 }
 
 .btn-route-muted:hover,
@@ -445,8 +515,8 @@ input[type="range"]::-moz-range-thumb {
 #cancelButton:hover,
 #cancelButton:focus {
     color: var(--color-on-primary);
-    background: rgba(220, 38, 38, 0.22);
-    border-color: rgba(220, 38, 38, 0.45);
+    background: color-mix(in srgb, var(--color-danger) 18%, var(--mac-control-bg));
+    border-color: color-mix(in srgb, var(--color-danger) 38%, var(--mac-hairline));
 }
 
 .route-preview-controls {
@@ -461,12 +531,12 @@ input[type="range"]::-moz-range-thumb {
     min-height: 38px;
     gap: 8px;
     color: var(--color-on-primary);
-    background: var(--route-primary);
-    border: 1px solid var(--route-primary-strong);
-    border-radius: var(--radius-sm);
+    background: var(--mac-accent);
+    border: 0.5px solid color-mix(in srgb, var(--mac-accent) 78%, #000000);
+    border-radius: var(--mac-radius-control);
     font: inherit;
     font-size: 0.9rem;
-    font-weight: 750;
+    font-weight: 650;
     cursor: pointer;
     transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease;
 }
@@ -474,12 +544,12 @@ input[type="range"]::-moz-range-thumb {
 .route-preview-button:hover,
 .route-preview-button:focus {
     color: var(--color-on-primary);
-    background: var(--route-primary-strong);
-    border-color: var(--route-primary-strong);
+    background: var(--mac-accent-strong);
+    border-color: var(--mac-accent-strong);
 }
 
 .route-preview-button:focus-visible {
-    outline: 3px solid var(--route-primary);
+    outline: 3px solid var(--mac-focus-ring);
     outline-offset: 2px;
 }
 
@@ -546,7 +616,7 @@ input[type="range"]::-moz-range-thumb {
     align-items: center;
     width: 100%;
     gap: 11px;
-    color: var(--color-sidebar-text);
+    color: var(--color-text);
     text-decoration: none;
 }
 
@@ -554,7 +624,7 @@ input[type="range"]::-moz-range-thumb {
 .layer-toggle:focus,
 .user-toggle:hover,
 .user-toggle:focus {
-    color: var(--color-on-primary);
+    color: var(--mac-accent);
 }
 
 .layer-icon,
@@ -564,44 +634,47 @@ input[type="range"]::-moz-range-thumb {
     justify-content: center;
     width: 42px;
     height: 42px;
-    border-radius: var(--radius-sm);
-    background: rgba(20, 184, 166, 0.16);
-    color: var(--color-clinical);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-control);
+    background: var(--mac-muted-fill);
+    color: var(--mac-accent);
 }
 
 .user-avatar img {
     width: 42px;
     height: 42px;
     object-fit: cover;
-    border: 2px solid rgba(255, 255, 255, 0.72);
+    border: 0;
 }
 
 .dropdown-toggle::after {
     margin-left: auto;
-    color: var(--color-sidebar-muted);
+    color: var(--color-text-muted);
 }
 
 .dropdown-menu {
     padding: 6px;
-    background-color: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
+    background-color: var(--mac-window-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-panel);
+    box-shadow: var(--mac-card-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
 }
 
 .dropdown-divider {
-    border-color: var(--color-border);
+    border-color: var(--mac-hairline);
 }
 
 .dropdown-menu .dropdown-item {
     color: var(--color-text);
-    border-radius: 6px;
+    border-radius: 8px;
 }
 
 .dropdown-menu .dropdown-item:hover,
 .dropdown-menu .dropdown-item:focus {
-    color: var(--color-primary-strong);
-    background: var(--color-primary-soft);
+    color: var(--color-on-primary);
+    background: var(--mac-accent);
 }
 
 #options,
@@ -616,7 +689,7 @@ input[type="range"]::-moz-range-thumb {
 
 .active-layer {
     color: var(--color-on-primary) !important;
-    background: var(--color-primary) !important;
+    background: var(--mac-accent) !important;
 }
 
 .dropdown-icon {
@@ -628,19 +701,22 @@ input[type="range"]::-moz-range-thumb {
     max-width: min(500px, calc(100vw - 48px));
     overflow-y: auto;
     color: var(--color-text);
-    background-color: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
+    background-color: var(--mac-window-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-panel);
+    box-shadow: var(--mac-card-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(18px);
+    backdrop-filter: saturate(180%) blur(18px);
 }
 
 .route-selector .turn-directions-panel {
     margin-top: 14px;
     padding: 12px;
     color: var(--color-text);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    background: var(--mac-panel-bg);
+    border: 0.5px solid var(--mac-hairline);
+    border-radius: var(--mac-radius-panel);
+    box-shadow: var(--mac-card-shadow);
 }
 
 .turn-directions-header {
@@ -649,7 +725,7 @@ input[type="range"]::-moz-range-thumb {
     justify-content: space-between;
     gap: 12px;
     padding-bottom: 10px;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 0.5px solid var(--mac-hairline);
 }
 
 .turn-directions-title {
@@ -662,7 +738,7 @@ input[type="range"]::-moz-range-thumb {
 
 .turn-directions-summary {
     flex: 0 0 auto;
-    color: var(--color-primary-strong);
+    color: var(--mac-accent);
     font-size: 0.78rem;
     font-weight: 750;
     white-space: nowrap;
@@ -684,12 +760,12 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .turn-directions-list::-webkit-scrollbar-track {
-    background: var(--color-surface-soft);
+    background: transparent;
     border-radius: 999px;
 }
 
 .turn-directions-list::-webkit-scrollbar-thumb {
-    background: var(--color-border);
+    background: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
     border-radius: 999px;
 }
 
@@ -699,7 +775,7 @@ input[type="range"]::-moz-range-thumb {
     gap: 10px;
     align-items: start;
     padding: 10px 0;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 0.5px solid var(--mac-hairline);
 }
 
 .turn-directions-step:last-child {
@@ -712,9 +788,9 @@ input[type="range"]::-moz-range-thumb {
     justify-content: center;
     width: 32px;
     height: 32px;
-    color: var(--color-primary);
-    background: var(--color-primary-soft);
-    border-radius: var(--radius-sm);
+    color: var(--mac-accent);
+    background: var(--mac-accent-soft);
+    border-radius: var(--mac-radius-control);
 }
 
 .turn-directions-icon svg {

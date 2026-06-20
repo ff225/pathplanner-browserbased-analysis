@@ -29,7 +29,21 @@ Edit profile
 
 <section class="form-section">
     <h3 class="form-section-title">Clinical preferences</h3>
-    {{ form.default_pathology|as_crispy_field }}
+    <div class="clinical-options">
+        <label class="form-label">{{ form.default_pathology.label }}</label>
+        <div class="clinical-options-grid">
+            {% for choice in form.default_pathology %}
+            <div class="clinical-option">
+                {{ choice.tag }}
+                <label for="{{ choice.id_for_label }}" class="clinical-option-label">{{ choice.choice_label }}</label>
+            </div>
+            {% endfor %}
+        </div>
+        {% if form.default_pathology.errors %}
+        <div class="invalid-feedback d-block">{{ form.default_pathology.errors }}</div>
+        {% endif %}
+        <div class="form-text">{{ form.default_pathology.help_text }}</div>
+    </div>
 </section>
 {% endblock %}
 

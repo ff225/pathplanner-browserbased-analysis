@@ -19,7 +19,11 @@ class UserProfileForm(forms.ModelForm):
         help_texts = {
             'default_pathology': 'This condition is pre-selected when you plan a route.',
         }
-                
+
+        widgets = {
+            'default_pathology': forms.RadioSelect(),
+        }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Set fields as non-compulsory

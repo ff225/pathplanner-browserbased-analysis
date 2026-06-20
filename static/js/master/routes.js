@@ -2041,6 +2041,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
     routes = Array.isArray(routes) ? routes : [];
     console.log(`[setupRouteControlPanel] Setting up control panel with ${routes.length} routes. Condition: ${currentPatientCondition ? currentPatientCondition.name : 'N/A'}, Prefs: ${currentPreferences ? currentPreferences.label : 'N/A'}`);
     stopRoutePreview(map);
+    window.RouteStepSimulator && window.RouteStepSimulator.stop();
 
     // Remove existing route selector content from the directions panel
     clearRouteSelectorContainer();
@@ -2124,6 +2125,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
 
     function removeRouteAtIndex(routeIndex) {
         stopRoutePreview(map);
+        window.RouteStepSimulator && window.RouteStepSimulator.stop();
         const routeToRemove = routes[routeIndex];
         if (!routeToRemove) {
             return;
@@ -2185,7 +2187,35 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
 
         previewButton.addEventListener('click', () => {
             const selectedRoute = routes[getSelectedRouteIndexFromPanel(selectorContainer, routes, initialSelectedIndex)];
-            startRoutePreview(map, selectedRoute, previewButton);
+            if (!selectedRoute) {
+                return;
+            }
+
+            if (typeof window.RouteStepSimulator === 'undefined' || !window.RouteStepSimulator.start) {
+                startRoutePreview(map, selectedRoute, previewButton);
+                return;
+            }
+
+            stopRoutePreview(map, { restoreView: false });
+            window.RouteStepSimulator.stop();
+            setRoutePreviewButtonState(previewButton, 'running');
+
+            const stepCount = Math.max(1, getRouteDirectionSteps(selectedRoute).length || 1);
+            window.RouteStepSimulator.start({
+                map,
+                route: selectedRoute,
+                directionsListElement: document.getElementById('directionsList'),
+                stepDurationMs: Math.max(1500, 15000 / stepCount),
+                followCamera: true,
+                onStepEnter: (index, el) => {
+                    el.classList.add('directions-step--active');
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                },
+                onStepLeave: (index, el) => el.classList.remove('directions-step--active'),
+                onDone: () => {
+                    resetRoutePreviewButton(previewButton);
+                }
+            });
         });
         selectorContainer.appendChild(previewButton);
 
@@ -2244,6 +2274,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                 const selectedIdx = parseInt(this.dataset.index, 10);
                 console.log(`[setupRouteControlPanel] Radio changed. Selected route index: ${selectedIdx}`);
                 stopRoutePreview(map);
+                window.RouteStepSimulator && window.RouteStepSimulator.stop();
 
                 routes.forEach((r, i) => {
                     r.isBest = (i === selectedIdx);

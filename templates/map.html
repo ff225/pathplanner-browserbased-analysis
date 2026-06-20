@@ -25,6 +25,12 @@
                 <path fill-rule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
             </svg>
         </button>
+        <button id="envInspectorToggle" class="env-inspector-toggle" type="button" aria-controls="envInspectorPanel" aria-expanded="false" aria-label="Open environmental data panel" title="Environmental data">
+            <svg xmlns="http://www.w3.org/2000/svg" width="21" height="21" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M8.5 2a.5.5 0 0 0-1 0v5.5H2a.5.5 0 0 0 0 1h5.5V14a.5.5 0 0 0 1 0V8.5H14a.5.5 0 0 0 0-1H8.5V2z"/>
+                <path d="M2.5 4.5a2 2 0 0 1 2-2H6a.5.5 0 0 1 0 1H4.5a1 1 0 0 0 0 2h7a2 2 0 1 1 0 4H10a.5.5 0 0 1 0-1h1.5a1 1 0 1 0 0-2h-7a2 2 0 0 1-2-2z"/>
+            </svg>
+        </button>
         <div class="row map-layout">
             <aside id="routeSidebar" class="col-md-3 col-lg-2 sidebar p-3" aria-label="Route planning controls">
                 <a href="{% url 'home' %}" class="brand-lockup mb-3">
@@ -201,6 +207,43 @@
                 <div id="map"></div>
             </main>
         </div>
+        <div id="envInspectorScrim" class="env-inspector-scrim" hidden></div>
+        <aside id="envInspectorPanel" class="env-inspector-panel" aria-label="Environmental data inspector" aria-hidden="true">
+            <header class="env-inspector-header">
+                <div class="env-inspector-title-block">
+                    <span class="env-inspector-kicker">Real environmental telemetry</span>
+                    <h2 class="env-inspector-title">Air impact by pathology</h2>
+                </div>
+                <div class="env-inspector-actions">
+                    <button id="envInspectorRefresh" class="env-icon-button" type="button" aria-label="Refresh environmental data" title="Refresh environmental data">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                            <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.418A6 6 0 1 1 8 2v1z"/>
+                            <path d="M8 0a.5.5 0 0 1 .5.5v3A.5.5 0 0 1 8 4H5a.5.5 0 0 1 0-1h2.5V.5A.5.5 0 0 1 8 0z"/>
+                        </svg>
+                    </button>
+                    <button id="envInspectorClose" class="env-icon-button" type="button" aria-label="Close environmental data panel" title="Close">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                            <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+            <section id="envInspectorAqi" class="env-aqi-card env-aqi-card--loading" aria-live="polite">
+                <div class="env-aqi-ring" aria-hidden="true">
+                    <span class="env-aqi-value">N/D</span>
+                </div>
+                <div class="env-aqi-copy">
+                    <span class="env-aqi-label">AQI non disponibile <span class="env-real-badge env-real-badge--nd">N/D</span></span>
+                    <span class="env-aqi-source">Apri il pannello per caricare dati reali.</span>
+                </div>
+            </section>
+            <div class="env-context-row" aria-live="polite">
+                <span id="envInspectorPathologies" class="env-context-pill">Pathology: default</span>
+                <span id="envInspectorLocation" class="env-context-pill">Map center</span>
+            </div>
+            <div id="envInspectorStatus" class="env-inspector-status" role="status">Open the panel to load real environmental samples.</div>
+            <div id="envMetricGroups" class="env-metric-groups" aria-live="polite"></div>
+        </aside>
     </div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
@@ -221,6 +264,7 @@
     <script src="{% static 'js/markers.js' %}"></script>
     <script src="{% static 'js/master/preferences.js' %}" type="module"></script>
     <script src="{% static 'js/routing.js' %}" type="module"></script>
+    <script src="{% static 'js/environmentInspector.js' %}" type="module"></script>
     {% if benchmark_mode %}
     <script src="{% static 'js/benchmark/automation.js' %}" type="module"></script>
     {% endif %}

@@ -23,7 +23,6 @@ class MapView(TemplateView):
             context['user_preferences'] = user.userprofile.preferences.all()
         context['benchmark_mode'] = self.request.GET.get('benchmark') == '1'
         context['mapbox_access_token'] = settings.MAPBOX_ACCESS_TOKEN
-        context['locationiq_access_token'] = settings.LOCATIONIQ_ACCESS_TOKEN
         return context
 
 

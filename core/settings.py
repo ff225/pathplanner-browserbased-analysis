@@ -41,7 +41,6 @@ load_local_env()
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-development-only-change-me')
 MAPBOX_ACCESS_TOKEN = os.environ.get('MAPBOX_ACCESS_TOKEN', '')
-LOCATIONIQ_ACCESS_TOKEN = os.environ.get('LOCATIONIQ_ACCESS_TOKEN', '')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True

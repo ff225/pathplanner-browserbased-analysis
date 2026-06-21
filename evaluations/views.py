@@ -5,7 +5,7 @@ from users.models import UserPreferences
 from .models import Stazione, Misurazione
 from .utils import calculate_route  # Assuming you have a utility function for route calculation
 from .air_quality_service import air_quality_service
-from .environmental_data_service import environmental_data_service
+from .environmental_data_service import environmental_data_service, fetch_named_green_areas
 from .real_environment_service import build_environment_payload
 from .multifactor_scoring import calculate_multifactor_score
 from .route_waypoints import generate_condition_waypoints
@@ -671,6 +671,30 @@ def _parse_lat_lon(raw_lat, raw_lon):
     if not -180 <= lon <= 180:
         raise ValueError('lon must be between -180 and 180')
     return lat, lon
+
+
+def get_parks_in_bbox(request):
+    """Real OSM parks / green areas inside a bounding box.
+
+    GET /api/parks?min_lat=..&min_lon=..&max_lat=..&max_lon=..
+    Returns only genuine OpenStreetMap elements (name may be null when unnamed);
+    never synthetic. Used to list the green areas a proposed route passes by.
+    """
+    try:
+        min_lat = float(request.GET.get('min_lat'))
+        min_lon = float(request.GET.get('min_lon'))
+        max_lat = float(request.GET.get('max_lat'))
+        max_lon = float(request.GET.get('max_lon'))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'min_lat, min_lon, max_lat, max_lon must be numbers'}, status=400)
+
+    try:
+        payload = fetch_named_green_areas(min_lat, min_lon, max_lat, max_lon)
+        return JsonResponse(payload)
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=400)
+    except Exception:
+        return JsonResponse({'error': 'parks lookup failed'}, status=500)
 
 
 # View to handle air quality data requests

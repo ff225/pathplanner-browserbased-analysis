@@ -253,6 +253,91 @@ def _fetch_green_space(lat: float, lon: float) -> Tuple[Optional[float], str]:
     return score, 'OpenStreetMap-Overpass'
 
 
+# Green tags whose elements are worth listing even when they have no name
+# (the route honestly passes a green area). Other green tags are listed only
+# when they carry a real OSM name, to avoid flooding the panel with noise.
+_GREEN_QUERY_FILTERS = (
+    'way["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
+    'relation["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
+    'way["landuse"~"^(forest|meadow|grass|village_green)$"]',
+    'way["natural"~"^(wood|grassland|scrub)$"]',
+    'node["leisure"~"^(park|garden)$"]',
+)
+_GREEN_KINDS_KEEP_UNNAMED = {'park', 'garden', 'nature_reserve', 'forest', 'wood'}
+_MAX_GREEN_BBOX_SPAN = 0.25  # ~25 km guard against oversized Overpass queries
+
+
+def _green_kind(tags: Dict[str, Any]) -> Optional[str]:
+    for key in ('leisure', 'landuse', 'natural'):
+        value = tags.get(key)
+        if value:
+            return value
+    return None
+
+
+def fetch_named_green_areas(
+    min_lat: float, min_lon: float, max_lat: float, max_lon: float, limit: int = 120
+) -> Dict[str, Any]:
+    """Real OSM parks / green areas inside a bounding box.
+
+    Returns only genuine OpenStreetMap elements (never synthetic). Each item has
+    a real ``name`` from ``tags.name`` or ``None`` when the element is unnamed;
+    the caller labels unnamed areas honestly and never invents a name.
+    """
+    if max_lat < min_lat:
+        min_lat, max_lat = max_lat, min_lat
+    if max_lon < min_lon:
+        min_lon, max_lon = max_lon, min_lon
+    if (max_lat - min_lat) > _MAX_GREEN_BBOX_SPAN or (max_lon - min_lon) > _MAX_GREEN_BBOX_SPAN:
+        raise ValueError('bounding box too large')
+
+    cache_key = f'parks:{round(min_lat,4)},{round(min_lon,4)},{round(max_lat,4)},{round(max_lon,4)}'
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
+    body = ''.join(f'{f}({bbox});' for f in _GREEN_QUERY_FILTERS)
+    query = f'[out:json][timeout:25];({body});out tags center {int(limit)};'
+
+    data = _overpass_post(query)
+    parks = []
+    seen_names = set()
+    if data and isinstance(data.get('elements'), list):
+        for element in data['elements']:
+            tags = element.get('tags') or {}
+            name = tags.get('name')
+            kind = _green_kind(tags)
+            if not name and kind not in _GREEN_KINDS_KEEP_UNNAMED:
+                continue
+            if element.get('type') == 'node':
+                lat, lon = element.get('lat'), element.get('lon')
+            else:
+                center = element.get('center') or {}
+                lat, lon = center.get('lat'), center.get('lon')
+            if lat is None or lon is None:
+                continue
+            if name:
+                dedup_key = name.strip().lower()
+                if dedup_key in seen_names:
+                    continue
+                seen_names.add(dedup_key)
+            parks.append({
+                'name': name or None,
+                'lat': float(lat),
+                'lon': float(lon),
+                'kind': kind,
+            })
+
+    result = {
+        'parks': parks,
+        'count': len(parks),
+        'source': 'OpenStreetMap-Overpass',
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
 class EnvironmentalDataService:
     def get_environmental_data(self, lat: float, lon: float) -> Dict[str, Any]:
         cache_key = f'{round(lat, 4)},{round(lon, 4)}'

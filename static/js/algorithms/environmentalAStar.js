@@ -11,6 +11,7 @@ import * as AirQuality from '../services/airQuality.js';
 import * as Weather from '../services/weather.js';
 import * as Elevation from '../services/elevation.js';
 import { lookupEnv } from '../data/envTileIndex.js';
+import { fetchPoisForBounds } from '../services/poisAlongRoute.js';
 
 const POI_CATEGORY_TAGS = {
     hospital: ['node["amenity"="hospital"]', 'node["healthcare"="hospital"]'],
@@ -19,6 +20,13 @@ const POI_CATEGORY_TAGS = {
     tourism: ['node["tourism"="attraction"]', 'node["tourism"="museum"]', 'node["tourism"="viewpoint"]'],
     nature: ['node["leisure"="park"]', 'node["natural"="wood"]', 'node["leisure"="garden"]']
 };
+
+// A* POI categories the backend /api/pois proxy serves with REAL OSM data
+// (server-side mirror fallback), mapped to the proxy's category names. These are
+// fetched through the proxy below so real parks/hospitals reach the A* cost even
+// when a direct browser→Overpass call is blocked (CORS) or down. Categories not
+// listed here still query Overpass directly.
+const BACKEND_POI_CATEGORY = { nature: 'parks', hospital: 'hospitals' };
 
 // Lightweight, deterministic synthetic environmental data used during A* search.
 // We intentionally avoid live API calls per grid node because they make long routes
@@ -184,6 +192,25 @@ async function fetchPoiLocations(bbox, category) {
     const cacheKey = `${category}:${bbox.minLat.toFixed(5)},${bbox.minLon.toFixed(5)},${bbox.maxLat.toFixed(5)},${bbox.maxLon.toFixed(5)}`;
     if (window._astarPoiCache[cacheKey]) {
         return window._astarPoiCache[cacheKey];
+    }
+
+    // Prefer the backend /api/pois proxy for the categories it serves: it returns
+    // ONLY genuine OSM elements (never synthetic) and has a server-side mirror
+    // fallback, so real parks/hospitals reach the A* POI cost even when a direct
+    // browser→Overpass call is blocked (CORS) or down. On failure we degrade to an
+    // empty list (honest no-weighting) — never synthetic.
+    const backendCategory = BACKEND_POI_CATEGORY[category];
+    if (backendCategory) {
+        const realPois = await fetchPoisForBounds(
+            backendCategory,
+            { minLat: bbox.minLat, minLon: bbox.minLon, maxLat: bbox.maxLat, maxLon: bbox.maxLon },
+            { timeoutMs: 4000 }
+        );
+        const pois = realPois
+            .map(p => ({ lat: Number(p.lat), lon: Number(p.lon) }))
+            .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+        window._astarPoiCache[cacheKey] = pois;
+        return pois;
     }
 
     const tags = POI_CATEGORY_TAGS[category];

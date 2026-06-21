@@ -1,14 +1,14 @@
 /**
- * Parks-along-route: list the real green areas a proposed route passes by.
+ * POIs-along-route: list the real points of interest a proposed route passes by.
  *
- * Data source is the backend /api/parks proxy, which returns ONLY genuine
- * OpenStreetMap elements (name may be null when unnamed). No synthetic data is
- * ever produced here; unnamed areas are surfaced honestly by the caller and a
- * name is never invented.
+ * Data source is the backend /api/pois proxy (per category: parks, hospitals…),
+ * which returns ONLY genuine OpenStreetMap elements (name may be null when
+ * unnamed). No synthetic data is ever produced here; unnamed elements are
+ * surfaced honestly by the caller and a name is never invented.
  */
 
-// Max distance from the route polyline for a park to count as "passed by".
-export const PARK_PROXIMITY_THRESHOLD_M = 150;
+// Max distance from the route polyline for a POI to count as "passed by".
+export const POI_PROXIMITY_THRESHOLD_M = 150;
 
 const EARTH_M_PER_DEG_LAT = 111320;
 
@@ -54,15 +54,16 @@ function pointToSegment(p, a, b) {
 }
 
 /**
- * Ordered, deduped list of parks within `thresholdM` of the route polyline.
+ * Ordered, deduped list of POIs within `thresholdM` of the route polyline.
+ * Category-agnostic: works for parks, hospitals, or any {name, lat, lon, kind}.
  * @param {Array} routeCoords - route points ({lat,lng}|{lat,lon}|[lon,lat]).
- * @param {Array} parks - real parks ({name|null, lat, lon, kind}).
+ * @param {Array} pois - real POIs ({name|null, lat, lon, kind}).
  * @param {number} thresholdM - proximity threshold in metres.
  * @returns {Array<{name: string|null, distanceM: number, latlng: {lat, lon}, kind: string|null}>}
  */
-export function parksAlongRoute(routeCoords, parks, thresholdM = PARK_PROXIMITY_THRESHOLD_M) {
+export function poisAlongRoute(routeCoords, pois, thresholdM = POI_PROXIMITY_THRESHOLD_M) {
     const route = normalizeRoute(routeCoords);
-    if (route.length < 2 || !Array.isArray(parks) || parks.length === 0) {
+    if (route.length < 2 || !Array.isArray(pois) || pois.length === 0) {
         return [];
     }
 
@@ -80,8 +81,8 @@ export function parksAlongRoute(routeCoords, parks, thresholdM = PARK_PROXIMITY_
 
     const matches = [];
     const seen = new Set();
-    for (const park of parks) {
-        const latlng = toLatLon(park);
+    for (const poi of pois) {
+        const latlng = toLatLon(poi);
         if (!latlng) {
             continue;
         }
@@ -102,7 +103,7 @@ export function parksAlongRoute(routeCoords, parks, thresholdM = PARK_PROXIMITY_
             continue;
         }
 
-        const name = typeof park.name === 'string' && park.name.trim() ? park.name.trim() : null;
+        const name = typeof poi.name === 'string' && poi.name.trim() ? poi.name.trim() : null;
         const dedupKey = name
             ? `n:${name.toLowerCase()}`
             : `c:${latlng.lat.toFixed(4)},${latlng.lon.toFixed(4)}`;
@@ -115,7 +116,7 @@ export function parksAlongRoute(routeCoords, parks, thresholdM = PARK_PROXIMITY_
             name,
             distanceM: Math.round(best),
             latlng,
-            kind: typeof park.kind === 'string' ? park.kind : null,
+            kind: typeof poi.kind === 'string' ? poi.kind : null,
             progress: bestProgress,
         });
     }
@@ -124,7 +125,7 @@ export function parksAlongRoute(routeCoords, parks, thresholdM = PARK_PROXIMITY_
     return matches.map(({ progress, ...rest }) => rest);
 }
 
-/** Padded bounding box around a route, for the /api/parks query. */
+/** Padded bounding box around a route, for the /api/pois query. */
 export function routeBoundingBox(routeCoords, padDeg = 0.002) {
     const route = normalizeRoute(routeCoords);
     if (route.length === 0) {
@@ -148,25 +149,26 @@ export function routeBoundingBox(routeCoords, padDeg = 0.002) {
     };
 }
 
-const _parksCache = new Map();
+const _poisCache = new Map();
 
 /**
- * Fetch real parks for a bounding box from /api/parks (cached, non-throwing).
- * Returns [] on any failure so the UI degrades to an honest "no parks" state
- * rather than inventing data.
+ * Fetch real POIs of a category for a bounding box from /api/pois (cached,
+ * non-throwing). Returns [] on any failure so the UI degrades to an honest
+ * empty state rather than inventing data.
  */
-export async function fetchParksForBounds(boundingBox, { timeoutMs = 8000 } = {}) {
+export async function fetchPoisForBounds(category, boundingBox, { timeoutMs = 8000 } = {}) {
     if (!boundingBox) {
         return [];
     }
-    const key = ['minLat', 'minLon', 'maxLat', 'maxLon']
-        .map((k) => Number(boundingBox[k]).toFixed(4))
+    const key = [category, boundingBox.minLat, boundingBox.minLon, boundingBox.maxLat, boundingBox.maxLon]
+        .map((value, index) => (index === 0 ? value : Number(value).toFixed(4)))
         .join(',');
-    if (_parksCache.has(key)) {
-        return _parksCache.get(key);
+    if (_poisCache.has(key)) {
+        return _poisCache.get(key);
     }
 
     const params = new URLSearchParams({
+        category,
         min_lat: boundingBox.minLat,
         min_lon: boundingBox.minLon,
         max_lat: boundingBox.maxLat,
@@ -176,25 +178,25 @@ export async function fetchParksForBounds(boundingBox, { timeoutMs = 8000 } = {}
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const response = await fetch(`/api/parks?${params.toString()}`, { signal: controller.signal });
+        const response = await fetch(`/api/pois?${params.toString()}`, { signal: controller.signal });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
         const data = await response.json();
-        const parks = Array.isArray(data?.parks) ? data.parks : [];
-        _parksCache.set(key, parks);
-        return parks;
+        const pois = Array.isArray(data?.pois) ? data.pois : [];
+        _poisCache.set(key, pois);
+        return pois;
     } catch (error) {
-        console.warn('[parksAlongRoute] parks fetch failed:', error?.message || error);
+        console.warn(`[poisAlongRoute] ${category} fetch failed:`, error?.message || error);
         return [];
     } finally {
         clearTimeout(timeoutId);
     }
 }
 
-/** Convenience: fetch parks for the route bbox and return the ordered along-route list. */
-export async function getParksAlongRoute(routeCoords, thresholdM = PARK_PROXIMITY_THRESHOLD_M) {
+/** Convenience: fetch a category's POIs for the route bbox and return the ordered along-route list. */
+export async function getPoisAlongRoute(category, routeCoords, thresholdM = POI_PROXIMITY_THRESHOLD_M) {
     const boundingBox = routeBoundingBox(routeCoords);
-    const parks = await fetchParksForBounds(boundingBox);
-    return parksAlongRoute(routeCoords, parks, thresholdM);
+    const pois = await fetchPoisForBounds(category, boundingBox);
+    return poisAlongRoute(routeCoords, pois, thresholdM);
 }

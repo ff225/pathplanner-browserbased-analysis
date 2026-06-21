@@ -1,5 +1,6 @@
 document.addEventListener("DOMContentLoaded", function() {
     var currentLocationMarker;
+    var GEOLOCATION_ENV_EVENT = 'pathplanner:geolocation-position';
 
     // Function to get the current location and add a marker on the map
     function addCurrentLocationMarker() {
@@ -23,6 +24,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
                 // Center the map at the current location
                 map.setView([lat, lng], 13);
+                loadEnvironmentForCurrentLocation(lat, lng);
             }, function(error) {
                 // Handle errors related to geolocation
                 console.error("Error getting location: " + error.message);
@@ -33,6 +35,30 @@ document.addEventListener("DOMContentLoaded", function() {
             console.error("Geolocation is not supported by this browser.");
             toastr.error("Geolocation is not supported by this browser.");
         }
+    }
+
+    function loadEnvironmentForCurrentLocation(lat, lng) {
+        var point = {
+            lat: Number(lat),
+            lon: Number(lng),
+            lng: Number(lng)
+        };
+
+        if (!Number.isFinite(point.lat) || !Number.isFinite(point.lon)) {
+            return;
+        }
+
+        window.pathplannerLastGeolocationPoint = point;
+
+        if (window.pathplannerEnvironmentInspector && typeof window.pathplannerEnvironmentInspector.loadForCoordinates === 'function') {
+            window.pathplannerEnvironmentInspector.loadForCoordinates(point, {
+                force: true,
+                contextLabel: 'User location'
+            });
+            return;
+        }
+
+        window.dispatchEvent(new CustomEvent(GEOLOCATION_ENV_EVENT, { detail: point }));
     }
 
     // Add the current location marker when the map is loaded

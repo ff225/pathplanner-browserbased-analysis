@@ -440,7 +440,7 @@ function clearElementChildren(element) {
 }
 
 function isTechnicalRouteDescription(description) {
-    return /A\* Cost|Grid environmental A\*|search nodes|nodes explored|heuristic|raw A\*|real data/i.test(description);
+    return /A\* Cost|Grid environmental A\*|search nodes|nodes explored|heuristic|raw A\*/i.test(description);
 }
 
 function getUserFacingRouteDescription(route) {
@@ -449,9 +449,61 @@ function getUserFacingRouteDescription(route) {
         return description;
     }
 
-    return route?.isDirectRoute
+    const baseDescription = route?.isDirectRoute
         ? 'Percorso diretto standard'
         : 'Percorso ottimizzato per il profilo clinico';
+
+    const realDataMatch = description.match(/\b\d+(?:\.\d+)?%\s*real data\b/i);
+    return realDataMatch ? `${baseDescription} (${realDataMatch[0]})` : baseDescription;
+}
+
+/**
+ * Compute the environmental-data provenance badge for a route.
+ * Synthetic fallback must never be shown with the green REAL state.
+ */
+function getRouteEnvDataBadge(route) {
+    if (!route || route.isDirectRoute) {
+        return null;
+    }
+
+    let realPct = (typeof route.realDataPercentage === 'number' && Number.isFinite(route.realDataPercentage))
+        ? route.realDataPercentage
+        : null;
+    const list = Array.isArray(route.environmentDataList) ? route.environmentDataList : null;
+
+    if (realPct === null && list && list.length > 0) {
+        const realCount = list.filter(point => point && !point.isDefault && !point.isSynthetic && !point.isEnhanced).length;
+        realPct = (realCount / list.length) * 100;
+    }
+
+    if (realPct === null) {
+        return null;
+    }
+
+    if (realPct === 100) {
+        return {
+            cssClass: 'env-real-badge--ok',
+            label: 'REAL 100%',
+            title: "All of this route's environmental data is real from /api/environment."
+        };
+    }
+
+    const clampedPct = Math.min(100, Math.max(0, realPct));
+    if (clampedPct > 0) {
+        const realDisplayPct = Math.min(99, Math.max(1, Math.round(clampedPct)));
+        const syntheticDisplayPct = 100 - realDisplayPct;
+        return {
+            cssClass: 'env-real-badge--synthetic',
+            label: `MIXED ${realDisplayPct}% REAL · ${syntheticDisplayPct}% SYNTH`,
+            title: `${realDisplayPct}% real environmental data from /api/environment; ${syntheticDisplayPct}% synthetic fallback.`
+        };
+    }
+
+    return {
+        cssClass: 'env-real-badge--synthetic',
+        label: 'SYNTHETIC',
+        title: 'Real environmental data was unavailable for this route; values are synthetic fallback data.'
+    };
 }
 
 function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
@@ -473,6 +525,13 @@ function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
         heading
     );
     routeType.textContent = route.isDirectRoute ? 'DIRECT' : 'OPTIMIZED';
+
+    const envBadge = getRouteEnvDataBadge(route);
+    if (envBadge) {
+        const badgeEl = L.DomUtil.create('span', `env-real-badge ${envBadge.cssClass}`, heading);
+        badgeEl.textContent = envBadge.label;
+        badgeEl.title = envBadge.title;
+    }
 
     const distanceSummary = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
     const durationSummary = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);

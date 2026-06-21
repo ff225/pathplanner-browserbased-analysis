@@ -233,6 +233,23 @@ export async function generateOptimizedRoutes(
                     window.PATHPLANNER_BENCHMARK && window.BENCHMARK_ASTAR_NUM_ROUTES != null
                         ? window.BENCHMARK_ASTAR_NUM_ROUTES
                         : numRoutes;
+
+                // Option B (hybrid): fire a NON-BLOCKING low-res real-env pre-fetch
+                // that seeds the A* selection-cost tile cache. We do NOT await it —
+                // A* starts immediately and uses marked synthetic wherever the real
+                // seed has not yet resolved. If the APIs are slow/down, behaviour is
+                // identical to before (pure synthetic), so there is no regression.
+                EnvironmentalAStar.clearRealEnvTiles();
+                const realEnvPrefetch = prefetchRealEnvForSelection(
+                    startPoint,
+                    endPoint,
+                    patientCondition
+                );
+                // Swallow late rejections so the dangling promise never bubbles.
+                if (realEnvPrefetch && typeof realEnvPrefetch.catch === 'function') {
+                    realEnvPrefetch.catch(() => {});
+                }
+
                 const astarRoutes = await withTimeout(
                     EnvironmentalAStar.generateAlternativeRoutes(
                         startPoint,
@@ -660,6 +677,102 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     
     return R * c;
+}
+
+/**
+ * Build a COARSE grid (~n×n points, default 3×3 = 9) over the route bbox for the
+ * low-res real-env pre-fetch. Returns the points plus a nearest-neighbour match
+ * radius (≈ one coarse cell) so in-bbox A* nodes find a seeded real point.
+ * @param {Object} startPoint - {lat, lon}
+ * @param {Object} endPoint - {lat, lon}
+ * @param {Number} n - grid side (3 → 9 points)
+ */
+function buildCoarseEnvGrid(startPoint, endPoint, n = 3) {
+    const minLat = Math.min(startPoint.lat, endPoint.lat) - 0.005;
+    const maxLat = Math.max(startPoint.lat, endPoint.lat) + 0.005;
+    const minLon = Math.min(startPoint.lon, endPoint.lon) - 0.005;
+    const maxLon = Math.max(startPoint.lon, endPoint.lon) + 0.005;
+    const div = n > 1 ? n - 1 : 1;
+    const latStep = (maxLat - minLat) / div;
+    const lonStep = (maxLon - minLon) / div;
+    const points = [];
+    for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+            points.push({ lat: minLat + latStep * i, lon: minLon + lonStep * j });
+        }
+    }
+    const midLat = (minLat + maxLat) / 2;
+    const latM = latStep * 111320;
+    const lonM = lonStep * 111320 * Math.cos((midLat * Math.PI) / 180);
+    // ~0.75 of a coarse-cell diagonal: covers in-bbox nodes, still bounded.
+    const matchRadiusM = Math.max(300, Math.hypot(latM, lonM) * 0.75);
+    return { points, matchRadiusM };
+}
+
+/**
+ * NON-BLOCKING low-res pre-fetch of REAL environmental data over a coarse grid
+ * around the route bbox (Option B — hybrid). Each resolved REAL point
+ * (isDefault:false) is streamed into the A* real-tile seed so the SELECTED path
+ * is guided by real pollution/noise where available. A* is NEVER awaited on
+ * this: if a point has not resolved by the time A* evaluates a node, the cost
+ * uses marked synthetic. Reuses the same Environmental.getEnvironmentalData +
+ * 4-parallel pool + 2.5s timeout machinery as collectRealEnvironmentalData.
+ * @returns {Promise} resolves when the coarse grid finishes (telemetry only;
+ *                    callers MUST NOT await it before running A*).
+ */
+function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
+    const grid = buildCoarseEnvGrid(startPoint, endPoint, 3);
+    // Set the match radius up-front (also primes the seed before any point lands).
+    EnvironmentalAStar.seedRealEnvTiles([], grid.matchRadiusM);
+
+    async function fetchSeedPoint(pt) {
+        try {
+            window.useRealTimeData = true;
+            const envData = await Promise.race([
+                Environmental.getEnvironmentalData(pt.lat, pt.lon, patientCondition),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('prefetch timeout')), 2500)
+                ),
+            ]);
+            if (envData && !envData.isDefault) {
+                // Stream this real point into the seed immediately (incremental):
+                // nodes evaluated after this lands will use it; earlier ones used
+                // synthetic — that's the non-blocking trade-off, by design.
+                EnvironmentalAStar.seedRealEnvTiles(
+                    [{ lat: pt.lat, lon: pt.lon, data: envData }],
+                    grid.matchRadiusM
+                );
+                console.log(
+                    `[prefetchRealEnv] seeded REAL point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)})`
+                );
+                return true;
+            }
+        } catch (error) {
+            console.warn(
+                `[prefetchRealEnv] point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}) failed: ${error.message}`
+            );
+        }
+        return false;
+    }
+
+    const concurrency = 4;
+    let nextIndex = 0;
+    async function worker() {
+        while (nextIndex < grid.points.length) {
+            const slot = nextIndex++;
+            await fetchSeedPoint(grid.points[slot]);
+        }
+    }
+
+    return Promise.all(Array.from({ length: concurrency }, () => worker()))
+        .then(() => {
+            console.log(
+                `[prefetchRealEnv] coarse pre-fetch done, seed size=${EnvironmentalAStar.getRealEnvSeedSize()}`
+            );
+        })
+        .catch((err) => {
+            console.warn('[prefetchRealEnv] coarse pre-fetch error (non-fatal):', err.message);
+        });
 }
 
 /**

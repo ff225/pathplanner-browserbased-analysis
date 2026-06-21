@@ -25,6 +25,100 @@ const POI_CATEGORY_TAGS = {
 // unbearably slow; the real environmental profile is computed later for the final route.
 const astarEnvCache = new Map();
 
+// ---------------------------------------------------------------------------
+// Real environmental tile seed (Option B — hybrid, non-blocking).
+// A low-res pre-fetch of REAL /api/environment data (fired from routePlanner
+// BEFORE A* and NEVER awaited) streams resolved real points into this seed.
+// The A* cost function reads it as its TOP-priority environmental source, so
+// the SELECTED path is guided by real pollution/noise where available. If the
+// pre-fetch has not resolved for a given area, the cost falls back to the
+// marked synthetic model — A* never blocks waiting for real data.
+// HARD RULE: every point stored here is REAL (isSynthetic:false / isDefault:false);
+// synthetic points are rejected at the seam.
+// ---------------------------------------------------------------------------
+const realEnvSeed = {
+    points: [],
+    maxRadiusM: 1200,
+};
+
+// Per-route cost-source telemetry — lets us PROVE the selected path consumed
+// real env from the seed (vs synthetic fallback). Reset at each findOptimalRoute.
+let envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
+
+/**
+ * Drop all seeded real points. Call before each route so a route never reuses
+ * the previous route's real field.
+ */
+export function clearRealEnvTiles() {
+    realEnvSeed.points = [];
+}
+
+/**
+ * Seed REAL environmental points consumed by the A* selection cost.
+ * @param {Array} points - [{lat, lon, data}] where data is a real env object
+ *                          (isDefault:false / isSynthetic:false). Synthetic or
+ *                          default points are rejected (HARD honesty rule).
+ * @param {Number} [maxRadiusM] - nearest-neighbour match radius for lookup.
+ */
+export function seedRealEnvTiles(points, maxRadiusM) {
+    if (typeof maxRadiusM === 'number' && maxRadiusM > 0) {
+        realEnvSeed.maxRadiusM = maxRadiusM;
+    }
+    if (!Array.isArray(points)) return;
+    for (const p of points) {
+        if (!p || typeof p.lat !== 'number' || typeof p.lon !== 'number' || !p.data) continue;
+        // HARD RULE: only real data may be seeded as real. Never let synthetic in.
+        if (p.data.isDefault === true || p.data.isSynthetic === true) continue;
+        const data = { ...p.data, isSynthetic: false, isDefault: false };
+        realEnvSeed.points.push({ lat: p.lat, lon: p.lon, data });
+    }
+}
+
+/** Number of real points currently seeded (telemetry / proof). */
+export function getRealEnvSeedSize() {
+    return realEnvSeed.points.length;
+}
+
+/** Snapshot of per-route cost-source telemetry (telemetry / proof). */
+export function getEnvCostStats() {
+    return { ...envCostStats };
+}
+
+/**
+ * Nearest-neighbour lookup over the real seed. Returns the real env object
+ * (isSynthetic:false) for the closest seeded point within maxRadiusM, else null
+ * so the caller falls back to the next tier.
+ */
+function lookupSeededRealEnv(lat, lon) {
+    const pts = realEnvSeed.points;
+    if (pts.length === 0) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (const p of pts) {
+        const d = calculateDistance({ lat, lon }, p);
+        if (d < bestDist) {
+            bestDist = d;
+            best = p;
+        }
+    }
+    return best && bestDist <= realEnvSeed.maxRadiusM ? best.data : null;
+}
+
+/** Log the per-route cost-source breakdown (real-seed vs synthetic). */
+function logEnvCostStats() {
+    const s = envCostStats;
+    const realTotal = s.realSeedHits + s.staticTileHits;
+    const total = realTotal + s.suppliedHits + s.syntheticHits;
+    const pct = total > 0 ? ((realTotal / total) * 100).toFixed(1) : '0.0';
+    console.log(
+        `[A* env-cost] real-seed hits: ${s.realSeedHits} (isSynthetic:false), ` +
+        `static-tile: ${s.staticTileHits}, supplied: ${s.suppliedHits}, ` +
+        `synthetic fallback: ${s.syntheticHits} (isSynthetic:true) | ` +
+        `real share of selection cost ≈ ${pct}% over ${total} node evals ` +
+        `| seed size=${realEnvSeed.points.length}`
+    );
+}
+
 function deterministicLocationFactor(lat, lon) {
     const value = Math.abs(Math.sin(lat * 1000) * 10000 + Math.cos(lon * 1000) * 10000);
     return (value % 1000) / 1000;
@@ -223,6 +317,9 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
     const grid = createSearchGrid(start, goal, gridResolution);
     console.log(`Created search grid with ${grid.length} nodes`);
 
+    // Reset per-route cost-source telemetry (real-seed vs synthetic accounting).
+    envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
+
     // Reset the synthetic cache so each route calculation uses data consistent
     // with the current patient condition, then pre-compute for every grid node.
     astarEnvCache.clear();
@@ -262,6 +359,7 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
         if (isGoalReached(current, goal)) {
             const route = reconstructPath(cameFrom, current);
             console.log(`Goal reached! Path found with ${route.length} nodes`);
+            logEnvCostStats();
             return {
                 route: route,
                 environmentalScore: gScore[currentId]
@@ -310,6 +408,7 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
     
     // If we get here, no path was found - return the best partial route
     console.log("No complete path found, returning best partial route");
+    logEnvCostStats();
     return {
         route: bestRoute || [start, goal],
         environmentalScore: bestEnvironmentalScore
@@ -389,6 +488,18 @@ function getNeighbors(node, grid, resolution) {
         col = Math.round((node.lon - grid.minLon) / grid.lonStep);
     }
 
+    // Tolerance guards two float pitfalls that otherwise return ZERO neighbors
+    // (the open set then drains after the start node → "No complete path found"):
+    //   1) adjacent rows differ by exactly latStep, but accumulated-float makes
+    //      latDiff a sub-ULP larger than latRadius, so a bare `<=` rejects it;
+    //   2) the grid builds lonStep from cos(midLat) while this fn computes
+    //      lonRadius from cos(node.lat) — off-centre rows never match.
+    // The 3×3 cell scan already bounds candidates to truly-adjacent cells, so a
+    // 1.5× tolerance only restores correct 8-connectivity (no over-connection).
+    const NEIGHBOR_TOLERANCE = 1.5;
+    const latLimit = latRadius * NEIGHBOR_TOLERANCE;
+    const lonLimit = lonRadius * NEIGHBOR_TOLERANCE;
+
     const neighbors = [];
     for (let dRow = -1; dRow <= 1; dRow++) {
         for (let dCol = -1; dCol <= 1; dCol++) {
@@ -398,7 +509,7 @@ function getNeighbors(node, grid, resolution) {
                 if (gridNode === node) continue;
                 const latDiff = Math.abs(gridNode.lat - node.lat);
                 const lonDiff = Math.abs(gridNode.lon - node.lon);
-                if (latDiff <= latRadius && lonDiff <= lonRadius) {
+                if (latDiff <= latLimit && lonDiff <= lonLimit) {
                     neighbors.push(gridNode);
                 }
             }
@@ -423,16 +534,29 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
     const neighborId = nodeToId(neighbor);
     let cost = currentGScore + distance;
     
-    // Get environmental data hierarchy: 1) tile cache 2) supplied list 3) live API
-    let envData = lookupEnv(neighbor.lat, neighbor.lon);
+    // Environmental data hierarchy (Option B — real GUIDES selection, non-blocking):
+    //   0) real low-res pre-fetch seed (isSynthetic:false) — colors the SELECTION cost
+    //   1) pre-baked static tile cache (lookupEnv)
+    //   2) supplied environmentalData list
+    //   3) marked synthetic fallback (isSynthetic:true — never blocks, never "real")
+    let envData = lookupSeededRealEnv(neighbor.lat, neighbor.lon);
+    if (envData) {
+        envCostStats.realSeedHits++;
+    } else {
+        envData = lookupEnv(neighbor.lat, neighbor.lon);
+        if (envData) envCostStats.staticTileHits++;
+    }
     if (!envData && environmentalData) {
         envData = findClosestEnvironmentalData(neighbor, environmentalData);
+        if (envData) envCostStats.suppliedHits++;
     }
     if (!envData) {
         // Fast synthetic fallback: real environmental data is sampled later for the
         // final route; doing live API calls for every grid node makes long routes
-        // take 30+ seconds.
+        // take 30+ seconds. The pre-fetch seed above is what introduces real data
+        // into selection without that per-node cost.
         envData = getFastEnvironmentalData(neighbor.lat, neighbor.lon, patientCondition);
+        envCostStats.syntheticHits++;
     }
 
     // Apply environmental weights based on patient condition

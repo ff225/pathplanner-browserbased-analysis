@@ -2339,6 +2339,13 @@ function getRouteSelectorContainer() {
     return document.getElementById('directionsRouteSelector');
 }
 
+// Preview/stop nav controls live inside the "Indicazioni" tab pane (not the
+// shared route selector above the tabs) so they only show — and only illuminate
+// the turn-by-turn steps — while that tab is active.
+function getDirectionsPreviewControlsContainer() {
+    return document.getElementById('directionsPreviewControls');
+}
+
 function clearRouteSelectorContainer() {
     const container = getRouteSelectorContainer();
     if (container) {
@@ -2486,6 +2493,11 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
     if (selectorContainer) {
         selectorContainer.innerHTML = '';
 
+        const previewControlsContainer = getDirectionsPreviewControlsContainer();
+        if (previewControlsContainer) {
+            previewControlsContainer.innerHTML = '';
+        }
+
         const previewButton = document.createElement('button');
         previewButton.type = 'button';
         previewButton.className = 'directions-route-preview';
@@ -2571,8 +2583,9 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             setPreviewControlsRunning(false);
         });
 
-        selectorContainer.appendChild(previewButton);
-        selectorContainer.appendChild(stopPreviewButton);
+        const previewControlsTarget = previewControlsContainer || selectorContainer;
+        previewControlsTarget.appendChild(previewButton);
+        previewControlsTarget.appendChild(stopPreviewButton);
 
         if (routes.length === 2) {
             const directRoute = routes.find(r => r.isDirectRoute);

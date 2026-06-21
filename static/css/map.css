@@ -2147,6 +2147,20 @@ body.right-sidebar-open.directions-open .directions-panel {
     border-color: rgba(239, 68, 68, 0.9);
 }
 
+.directions-preview-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.directions-preview-controls:empty {
+    display: none;
+}
+
+.directions-preview-controls:not(:empty) {
+    margin-bottom: 10px;
+}
+
 .directions-route-preview {
     display: inline-flex;
     align-items: center;

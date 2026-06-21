@@ -254,62 +254,87 @@ def _fetch_green_space(lat: float, lon: float) -> Tuple[Optional[float], str]:
     return score, 'OpenStreetMap-Overpass'
 
 
-# Green tags whose elements are worth listing even when they have no name
-# (the route honestly passes a green area). Other green tags are listed only
+# POI categories listable along a route. Each maps to Overpass element filters,
+# the tag keys that describe its "kind", and the kinds worth listing even when
+# unnamed (the route honestly passes the place). Other matches are listed only
 # when they carry a real OSM name, to avoid flooding the panel with noise.
-_GREEN_QUERY_FILTERS = (
-    'way["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
-    'relation["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
-    'way["landuse"~"^(forest|meadow|grass|village_green)$"]',
-    'way["natural"~"^(wood|grassland|scrub)$"]',
-    'node["leisure"~"^(park|garden)$"]',
-)
-_GREEN_KINDS_KEEP_UNNAMED = {'park', 'garden', 'nature_reserve', 'forest', 'wood'}
-_MAX_GREEN_BBOX_SPAN = 0.25  # ~25 km guard against oversized Overpass queries
+_POI_CATEGORIES = {
+    'parks': {
+        'filters': (
+            'way["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
+            'relation["leisure"~"^(park|garden|nature_reserve|recreation_ground)$"]',
+            'way["landuse"~"^(forest|meadow|grass|village_green)$"]',
+            'way["natural"~"^(wood|grassland|scrub)$"]',
+            'node["leisure"~"^(park|garden)$"]',
+        ),
+        'kind_keys': ('leisure', 'landuse', 'natural'),
+        'keep_unnamed_kinds': {'park', 'garden', 'nature_reserve', 'forest', 'wood'},
+    },
+    'hospitals': {
+        'filters': (
+            'node["amenity"="hospital"]',
+            'way["amenity"="hospital"]',
+            'relation["amenity"="hospital"]',
+            'node["healthcare"="hospital"]',
+            'way["healthcare"="hospital"]',
+            'relation["healthcare"="hospital"]',
+        ),
+        'kind_keys': ('amenity', 'healthcare'),
+        'keep_unnamed_kinds': {'hospital'},
+    },
+}
+POI_CATEGORIES = tuple(_POI_CATEGORIES.keys())
+_MAX_POI_BBOX_SPAN = 0.25  # ~25 km guard against oversized Overpass queries
 
 
-def _green_kind(tags: Dict[str, Any]) -> Optional[str]:
-    for key in ('leisure', 'landuse', 'natural'):
+def _poi_kind(tags: Dict[str, Any], kind_keys) -> Optional[str]:
+    for key in kind_keys:
         value = tags.get(key)
         if value:
             return value
     return None
 
 
-def fetch_named_green_areas(
-    min_lat: float, min_lon: float, max_lat: float, max_lon: float, limit: int = 120
+def fetch_named_pois(
+    category: str, min_lat: float, min_lon: float, max_lat: float, max_lon: float, limit: int = 120
 ) -> Dict[str, Any]:
-    """Real OSM parks / green areas inside a bounding box.
+    """Real OSM POIs of a category inside a bounding box.
 
     Returns only genuine OpenStreetMap elements (never synthetic). Each item has
     a real ``name`` from ``tags.name`` or ``None`` when the element is unnamed;
-    the caller labels unnamed areas honestly and never invents a name.
+    the caller labels unnamed elements honestly and never invents a name.
     """
+    config = _POI_CATEGORIES.get(category)
+    if config is None:
+        raise ValueError('unknown POI category')
+
     if max_lat < min_lat:
         min_lat, max_lat = max_lat, min_lat
     if max_lon < min_lon:
         min_lon, max_lon = max_lon, min_lon
-    if (max_lat - min_lat) > _MAX_GREEN_BBOX_SPAN or (max_lon - min_lon) > _MAX_GREEN_BBOX_SPAN:
+    if (max_lat - min_lat) > _MAX_POI_BBOX_SPAN or (max_lon - min_lon) > _MAX_POI_BBOX_SPAN:
         raise ValueError('bounding box too large')
 
-    cache_key = f'parks:{round(min_lat,4)},{round(min_lon,4)},{round(max_lat,4)},{round(max_lon,4)}'
+    cache_key = f'pois:{category}:{round(min_lat,4)},{round(min_lon,4)},{round(max_lat,4)},{round(max_lon,4)}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
-    body = ''.join(f'{f}({bbox});' for f in _GREEN_QUERY_FILTERS)
+    body = ''.join(f'{f}({bbox});' for f in config['filters'])
     query = f'[out:json][timeout:25];({body});out tags center {int(limit)};'
 
     data = _overpass_post(query)
-    parks = []
+    pois = []
     seen_names = set()
+    keep_unnamed = config['keep_unnamed_kinds']
+    kind_keys = config['kind_keys']
     if data and isinstance(data.get('elements'), list):
         for element in data['elements']:
             tags = element.get('tags') or {}
             name = tags.get('name')
-            kind = _green_kind(tags)
-            if not name and kind not in _GREEN_KINDS_KEEP_UNNAMED:
+            kind = _poi_kind(tags, kind_keys)
+            if not name and kind not in keep_unnamed:
                 continue
             if element.get('type') == 'node':
                 lat, lon = element.get('lat'), element.get('lon')
@@ -323,7 +348,7 @@ def fetch_named_green_areas(
                 if dedup_key in seen_names:
                     continue
                 seen_names.add(dedup_key)
-            parks.append({
+            pois.append({
                 'name': name or None,
                 'lat': float(lat),
                 'lon': float(lon),
@@ -331,8 +356,9 @@ def fetch_named_green_areas(
             })
 
     result = {
-        'parks': parks,
-        'count': len(parks),
+        'pois': pois,
+        'category': category,
+        'count': len(pois),
         'source': 'OpenStreetMap-Overpass',
     }
     _cache_set(cache_key, result)

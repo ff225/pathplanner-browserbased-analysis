@@ -265,9 +265,18 @@
                 </button>
             </header>
             <div id="directionsRouteSelector" class="directions-route-selector"></div>
-            <div id="directionsSummary" class="directions-summary"></div>
-            <ol id="directionsList" class="directions-list" aria-live="polite"></ol>
-            <div id="directionsEmpty" class="directions-empty" hidden>Calculate a route to see turn-by-turn directions.</div>
+            <div class="directions-tabs" role="tablist" aria-label="Dettagli percorso">
+                <button id="directionsTabIndicazioni" class="directions-tab directions-tab--active" type="button" role="tab" aria-selected="true" aria-controls="directionsTabpaneIndicazioni" data-directions-tab="indicazioni">Indicazioni</button>
+                <button id="directionsTabOnRoute" class="directions-tab" type="button" role="tab" aria-selected="false" aria-controls="directionsTabpaneOnRoute" data-directions-tab="onroute">Sul percorso</button>
+            </div>
+            <div id="directionsTabpaneIndicazioni" class="directions-tabpane directions-tabpane--active" role="tabpanel" aria-labelledby="directionsTabIndicazioni">
+                <div id="directionsSummary" class="directions-summary"></div>
+                <ol id="directionsList" class="directions-list" aria-live="polite"></ol>
+                <div id="directionsEmpty" class="directions-empty" hidden>Calculate a route to see turn-by-turn directions.</div>
+            </div>
+            <div id="directionsTabpaneOnRoute" class="directions-tabpane" role="tabpanel" aria-labelledby="directionsTabOnRoute" hidden>
+                <div id="onRouteContent" class="on-route-content"></div>
+            </div>
         </div>
     </div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

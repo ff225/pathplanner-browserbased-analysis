@@ -868,44 +868,96 @@ input[type="range"]::-moz-range-thumb {
     overflow-wrap: anywhere;
 }
 
-.route-card-parks {
-    margin-top: 8px;
-    padding-top: 6px;
-    border-top: 0.5px solid var(--mac-hairline);
+.directions-tabs {
+    display: flex;
+    gap: 4px;
+    margin-top: 10px;
+    padding-bottom: 6px;
+    border-bottom: 0.5px solid var(--mac-hairline);
+}
+
+.directions-tab {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+    font-weight: 650;
+    padding: 6px 10px;
+    border-radius: var(--mac-radius-control);
+    cursor: pointer;
+}
+
+.directions-tab:hover {
+    background: var(--mac-panel-bg-hover);
+    color: var(--color-text);
+}
+
+.directions-tab--active {
+    color: var(--color-on-primary);
+    background: var(--mac-accent);
+}
+
+.directions-tab:focus-visible {
+    outline: 3px solid var(--mac-focus-ring);
+    outline-offset: 1px;
+}
+
+.directions-tabpane {
+    display: none;
+    margin-top: 10px;
+}
+
+.directions-tabpane--active {
+    display: block;
+}
+
+.on-route-content {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 12px;
 }
 
-.route-card-parks-title {
+.on-route-category-title {
     color: var(--color-text);
-    font-size: 0.72rem;
+    font-size: 0.8rem;
     font-weight: 700;
     letter-spacing: 0.01em;
+    margin-bottom: 4px;
 }
 
-.route-card-parks-item {
+.on-route-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.on-route-item {
     color: var(--color-text-muted);
-    font-size: 0.74rem;
-    line-height: 1.3;
+    font-size: 0.78rem;
+    line-height: 1.35;
     overflow-wrap: anywhere;
 }
 
-.route-card-parks-item .route-card-parks-distance {
+.on-route-item .on-route-distance {
     color: var(--color-primary-strong);
     font-weight: 650;
 }
 
-.route-card-parks-empty,
-.route-card-parks-loading {
+.on-route-empty,
+.on-route-loading {
     color: var(--color-text-muted);
-    font-size: 0.72rem;
+    font-size: 0.76rem;
     font-style: italic;
 }
 
-.route-card-parks-more {
+.on-route-more {
     color: var(--color-text-muted);
-    font-size: 0.7rem;
+    font-size: 0.72rem;
+    margin-top: 2px;
 }
 
 .route-selector .turn-directions-panel {

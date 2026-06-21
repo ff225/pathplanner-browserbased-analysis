@@ -10,7 +10,7 @@ import * as ParksAlongRoute from '../services/parksAlongRoute.js';
 
 const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
 const ROUTE_COORDINATE_PRECISION = 5;
-const PARKS_ALONG_ROUTE_MAX_ITEMS = 8;
+const ON_ROUTE_MAX_ITEMS_PER_CATEGORY = 8;
 const ROUTE_PREVIEW_DURATION_MS = 15000;
 const ROUTE_PREVIEW_FOLLOW_ZOOM = 17;
 const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 80;
@@ -415,6 +415,9 @@ function renderDirectionsSidebar(route) {
     if (title) {
         title.textContent = routeName;
     }
+
+    ensureOnRouteTabsWired();
+    renderOnRoutePanel(route);
 }
 
 function setDirectionsSidebarOpen(open) {
@@ -545,66 +548,134 @@ function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
 
     const description = L.DomUtil.create('div', 'route-card-description', routeInfo);
     description.textContent = getUserFacingRouteDescription(route);
-
-    const parksSection = L.DomUtil.create('div', 'route-card-parks', routeInfo);
-    renderParksAlongRouteSection(parksSection, route);
 }
 
 /**
- * Asynchronously list the real green areas the route passes by, in the route
- * card. Only real OSM parks (from /api/parks); unnamed areas are shown honestly
- * as "Area verde" and names are never invented.
+ * "Sul percorso" tab — the POIs the proposed route passes, grouped by category.
+ *
+ * Extensible by design: add an entry to ON_ROUTE_POI_CATEGORIES and it renders
+ * as its own section. Each category fetches its own REAL data (never synthetic)
+ * and formats one item line. Today only "parks" is wired; new categories
+ * (e.g. hospitals) plug in here later with the same shape — no dead code now.
  */
-async function renderParksAlongRouteSection(container, route) {
+const ON_ROUTE_POI_CATEGORIES = [
+    {
+        id: 'parks',
+        title: 'Parchi e aree verdi',
+        loadingLabel: 'Cerco parchi reali lungo il percorso…',
+        emptyLabel: 'Nessun parco lungo il percorso.',
+        // Real OSM parks within PARK_PROXIMITY_THRESHOLD_M of the route, ordered.
+        fetchItems: (routeCoordinates) => ParksAlongRoute.getParksAlongRoute(routeCoordinates),
+        // Unnamed green areas are labelled honestly; names are never invented.
+        formatItem: (park) => ({
+            text: `Passa accanto a: ${park.name || 'Area verde'} `,
+            distance: `~${park.distanceM} m`,
+        }),
+    },
+    // EXTENSION POINT — to add a category push:
+    // { id, title, loadingLabel, emptyLabel,
+    //   fetchItems(routeCoordinates) -> Promise<item[]>, formatItem(item) -> {text, distance?} }
+];
+
+let _onRouteTabsWired = false;
+
+/** Wire the directions panel tab strip once (idempotent). */
+function ensureOnRouteTabsWired() {
+    if (_onRouteTabsWired) {
+        return;
+    }
+    const tabs = document.querySelectorAll('.directions-tab[data-directions-tab]');
+    if (!tabs.length) {
+        return;
+    }
+    tabs.forEach((tab) => {
+        tab.addEventListener('click', () => activateDirectionsTab(tab.dataset.directionsTab));
+    });
+    _onRouteTabsWired = true;
+}
+
+function activateDirectionsTab(tabId) {
+    document.querySelectorAll('.directions-tab[data-directions-tab]').forEach((tab) => {
+        const isActive = tab.dataset.directionsTab === tabId;
+        tab.classList.toggle('directions-tab--active', isActive);
+        tab.setAttribute('aria-selected', String(isActive));
+        const pane = document.getElementById(tab.getAttribute('aria-controls'));
+        if (pane) {
+            pane.classList.toggle('directions-tabpane--active', isActive);
+            pane.hidden = !isActive;
+        }
+    });
+}
+
+/**
+ * Render the "Sul percorso" tab for the selected route: one section per POI
+ * category. Only real OSM POIs; honest per-category empty state.
+ */
+function renderOnRoutePanel(route) {
+    const container = document.getElementById('onRouteContent');
     if (!container) {
         return;
     }
     clearElementChildren(container);
 
-    const title = L.DomUtil.create('div', 'route-card-parks-title', container);
-    title.textContent = 'Parchi e aree verdi sul percorso';
-    const loading = L.DomUtil.create('div', 'route-card-parks-loading', container);
-    loading.textContent = 'Cerco parchi reali lungo il percorso…';
-
     const coordinates = getRouteCoordinates(route);
     if (!coordinates || coordinates.length < 2) {
-        loading.className = 'route-card-parks-empty';
-        loading.textContent = 'Percorso non disponibile per la ricerca parchi.';
+        const empty = L.DomUtil.create('div', 'on-route-empty', container);
+        empty.textContent = 'Percorso non disponibile.';
         return;
     }
 
-    let parks = [];
+    // Token guards against a newer route replacing this one mid-fetch.
+    const renderToken = {};
+    container._onRouteToken = renderToken;
+
+    ON_ROUTE_POI_CATEGORIES.forEach((category) => {
+        renderOnRoutePoiCategory(container, category, coordinates, renderToken);
+    });
+}
+
+async function renderOnRoutePoiCategory(container, category, coordinates, renderToken) {
+    const section = L.DomUtil.create('div', 'on-route-category', container);
+    const title = L.DomUtil.create('div', 'on-route-category-title', section);
+    title.textContent = category.title;
+    const loading = L.DomUtil.create('div', 'on-route-loading', section);
+    loading.textContent = category.loadingLabel;
+
+    let items = [];
     try {
-        parks = await ParksAlongRoute.getParksAlongRoute(coordinates);
+        items = await category.fetchItems(coordinates);
     } catch (error) {
-        console.warn('[routes] parks-along-route lookup failed:', error);
+        console.warn(`[routes] on-route category "${category.id}" failed:`, error);
     }
 
-    // The card may have been re-rendered or removed while awaiting the fetch.
-    if (!container.isConnected) {
+    // Stale guard: a newer route render replaced this one.
+    if (container._onRouteToken !== renderToken || !section.isConnected) {
         return;
     }
     loading.remove();
 
-    if (!parks.length) {
-        const empty = L.DomUtil.create('div', 'route-card-parks-empty', container);
-        empty.textContent = 'Nessun parco rilevante lungo il percorso.';
+    if (!Array.isArray(items) || items.length === 0) {
+        const empty = L.DomUtil.create('div', 'on-route-empty', section);
+        empty.textContent = category.emptyLabel;
         return;
     }
 
-    const shown = parks.slice(0, PARKS_ALONG_ROUTE_MAX_ITEMS);
-    shown.forEach((park) => {
-        const item = L.DomUtil.create('div', 'route-card-parks-item', container);
-        const name = park.name || 'Area verde';
-        item.appendChild(document.createTextNode(`Passa accanto a: ${name} `));
-        const distance = L.DomUtil.create('span', 'route-card-parks-distance', item);
-        distance.textContent = `~${park.distanceM} m`;
+    const list = L.DomUtil.create('ul', 'on-route-list', section);
+    const shown = items.slice(0, ON_ROUTE_MAX_ITEMS_PER_CATEGORY);
+    shown.forEach((item) => {
+        const formatted = category.formatItem(item);
+        const li = L.DomUtil.create('li', 'on-route-item', list);
+        li.appendChild(document.createTextNode(formatted.text));
+        if (formatted.distance) {
+            const distance = L.DomUtil.create('span', 'on-route-distance', li);
+            distance.textContent = formatted.distance;
+        }
     });
 
-    const remaining = parks.length - shown.length;
+    const remaining = items.length - shown.length;
     if (remaining > 0) {
-        const more = L.DomUtil.create('div', 'route-card-parks-more', container);
-        more.textContent = `+${remaining} altre aree verdi vicine`;
+        const more = L.DomUtil.create('div', 'on-route-more', section);
+        more.textContent = `+${remaining} altri`;
     }
 }
 

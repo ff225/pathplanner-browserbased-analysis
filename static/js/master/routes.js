@@ -6,7 +6,7 @@ import * as Scores from '../master/scores.js';
 import * as Environmental from '../services/environmental.js';
 import * as PointOfInterests from '../services/pointOfInterest.js';
 import * as RoutePlanner from '../services/routePlanner.js';
-import * as ParksAlongRoute from '../services/parksAlongRoute.js';
+import * as PoisAlongRoute from '../services/poisAlongRoute.js';
 
 const MAPBOX_ACCESS_TOKEN = globalThis.window?.MAPBOX_ACCESS_TOKEN || '';
 const ROUTE_COORDINATE_PRECISION = 5;
@@ -555,8 +555,7 @@ function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
  *
  * Extensible by design: add an entry to ON_ROUTE_POI_CATEGORIES and it renders
  * as its own section. Each category fetches its own REAL data (never synthetic)
- * and formats one item line. Today only "parks" is wired; new categories
- * (e.g. hospitals) plug in here later with the same shape — no dead code now.
+ * via /api/pois?category= and formats one item line.
  */
 const ON_ROUTE_POI_CATEGORIES = [
     {
@@ -564,12 +563,25 @@ const ON_ROUTE_POI_CATEGORIES = [
         title: 'Parchi e aree verdi',
         loadingLabel: 'Cerco parchi reali lungo il percorso…',
         emptyLabel: 'Nessun parco lungo il percorso.',
-        // Real OSM parks within PARK_PROXIMITY_THRESHOLD_M of the route, ordered.
-        fetchItems: (routeCoordinates) => ParksAlongRoute.getParksAlongRoute(routeCoordinates),
+        // Real OSM parks within POI_PROXIMITY_THRESHOLD_M of the route, ordered.
+        fetchItems: (routeCoordinates) => PoisAlongRoute.getPoisAlongRoute('parks', routeCoordinates),
         // Unnamed green areas are labelled honestly; names are never invented.
         formatItem: (park) => ({
             text: `Passa accanto a: ${park.name || 'Area verde'} `,
             distance: `~${park.distanceM} m`,
+        }),
+    },
+    {
+        id: 'hospitals',
+        title: 'Ospedali',
+        loadingLabel: 'Cerco ospedali reali lungo il percorso…',
+        emptyLabel: 'Nessun ospedale lungo il percorso.',
+        // Real OSM hospitals within POI_PROXIMITY_THRESHOLD_M of the route, ordered.
+        fetchItems: (routeCoordinates) => PoisAlongRoute.getPoisAlongRoute('hospitals', routeCoordinates),
+        // Unnamed facilities get an honest generic label; names are never invented.
+        formatItem: (hospital) => ({
+            text: `Passa accanto a: ${hospital.name || 'Struttura sanitaria'} `,
+            distance: `~${hospital.distanceM} m`,
         }),
     },
     // EXTENSION POINT — to add a category push:

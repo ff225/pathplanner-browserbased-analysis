@@ -5,7 +5,7 @@ from users.models import UserPreferences
 from .models import Stazione, Misurazione
 from .utils import calculate_route  # Assuming you have a utility function for route calculation
 from .air_quality_service import air_quality_service
-from .environmental_data_service import environmental_data_service, fetch_named_green_areas
+from .environmental_data_service import environmental_data_service, fetch_named_pois, POI_CATEGORIES
 from .real_environment_service import build_environment_payload
 from .multifactor_scoring import calculate_multifactor_score
 from .route_waypoints import generate_condition_waypoints
@@ -673,13 +673,18 @@ def _parse_lat_lon(raw_lat, raw_lon):
     return lat, lon
 
 
-def get_parks_in_bbox(request):
-    """Real OSM parks / green areas inside a bounding box.
+def get_pois_in_bbox(request):
+    """Real OSM POIs of a category inside a bounding box.
 
-    GET /api/parks?min_lat=..&min_lon=..&max_lat=..&max_lon=..
+    GET /api/pois?category=parks|hospitals&min_lat=..&min_lon=..&max_lat=..&max_lon=..
     Returns only genuine OpenStreetMap elements (name may be null when unnamed);
-    never synthetic. Used to list the green areas a proposed route passes by.
+    never synthetic. Used to list the POIs a proposed route passes by.
     """
+    category = request.GET.get('category', 'parks')
+    if category not in POI_CATEGORIES:
+        return JsonResponse(
+            {'error': f'category must be one of {", ".join(POI_CATEGORIES)}'}, status=400
+        )
     try:
         min_lat = float(request.GET.get('min_lat'))
         min_lon = float(request.GET.get('min_lon'))
@@ -689,12 +694,12 @@ def get_parks_in_bbox(request):
         return JsonResponse({'error': 'min_lat, min_lon, max_lat, max_lon must be numbers'}, status=400)
 
     try:
-        payload = fetch_named_green_areas(min_lat, min_lon, max_lat, max_lon)
+        payload = fetch_named_pois(category, min_lat, min_lon, max_lat, max_lon)
         return JsonResponse(payload)
     except ValueError as exc:
         return JsonResponse({'error': str(exc)}, status=400)
     except Exception:
-        return JsonResponse({'error': 'parks lookup failed'}, status=500)
+        return JsonResponse({'error': 'pois lookup failed'}, status=500)
 
 
 # View to handle air quality data requests

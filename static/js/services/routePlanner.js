@@ -710,13 +710,90 @@ function buildCoarseEnvGrid(startPoint, endPoint, n = 3) {
 }
 
 /**
+ * Map a single REAL /api/environment point payload into the env-point shape
+ * consumed by the A* selection cost (seedRealEnvTiles). ONLY measured, real
+ * fields are populated; anything the endpoint does not measure stays null so the
+ * cost function skips it on seeded nodes (the POI nature/static tiers still drive
+ * green/noise preference). Returns null when the point carries no usable real
+ * air-quality value, so synthetic/empty data is NEVER seeded as real (HARD
+ * honesty rule).
+ * @param {Object} point - one point object from /api/environment: {status, lat,
+ *   lon, pollutants:{european_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,...}} where
+ *   each pollutant is {value, status, source, ...}.
+ * @returns {Object|null} real env-point data (isSynthetic:false / isDefault:false)
+ *   or null to reject.
+ */
+function parseApiEnvironmentPoint(point) {
+    if (!point || point.status !== 'available') return null;
+    const pollutants = point.pollutants || {};
+    const realValue = (key) => {
+        const p = pollutants[key];
+        return p && p.status === 'available' && typeof p.value === 'number' && isFinite(p.value)
+            ? p.value
+            : null;
+    };
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+    const europeanAqi = realValue('european_aqi');
+    const pm25 = realValue('pm2_5');
+    const pm10 = realValue('pm10');
+    const ozone = realValue('ozone');
+    const no2 = realValue('nitrogen_dioxide');
+
+    // Map a real air-quality reading onto the app-wide 1-10 AQI scale used by the
+    // A* cost function and the synthetic fallback (default 5 = moderate). The
+    // European AQI is 0-100+, so /10 keeps the cost-function thresholds aligned.
+    let airQuality = null;
+    if (europeanAqi !== null) {
+        airQuality = clamp(europeanAqi / 10, 1, 10);
+    } else if (pm25 !== null) {
+        airQuality = clamp(1 + pm25 / 6, 1, 10);
+    } else if (pm10 !== null) {
+        airQuality = clamp(1 + pm10 / 12, 1, 10);
+    }
+
+    // No usable real air-quality value => not a real env point we can honestly
+    // seed. Reject (never seed synthetic/empty as real).
+    if (airQuality === null) return null;
+
+    return {
+        airQuality,
+        // Raw real pollutant readings, kept for transparency.
+        europeanAqi,
+        pm25,
+        pm10,
+        ozone,
+        no2,
+        // Fields /api/environment does not measure: null so the A* cost skips
+        // them on seeded nodes (POI nature + static tiers still apply).
+        noise: null,
+        slope: null,
+        temperature: null,
+        humidity: null,
+        greenVisibility: null,
+        trafficDensity: null,
+        source: 'Open-Meteo Air Quality API',
+        provider: 'Open-Meteo',
+        timestamp: Date.now(),
+        hasRealData: true,
+        realDataFlags: { airQuality: true },
+        isDefault: false,
+        isSynthetic: false,
+    };
+}
+
+/**
  * NON-BLOCKING low-res pre-fetch of REAL environmental data over a coarse grid
- * around the route bbox (Option B — hybrid). Each resolved REAL point
- * (isDefault:false) is streamed into the A* real-tile seed so the SELECTED path
- * is guided by real pollution/noise where available. A* is NEVER awaited on
- * this: if a point has not resolved by the time A* evaluates a node, the cost
- * uses marked synthetic. Reuses the same Environmental.getEnvironmentalData +
- * 4-parallel pool + 2.5s timeout machinery as collectRealEnvironmentalData.
+ * around the route bbox (Option B — hybrid). Each grid point is resolved with a
+ * single fast call to the Django /api/environment endpoint (real Open-Meteo air
+ * quality, warm ~3ms / cold ~2s) instead of the slow multi-API browser-side
+ * getEnvironmentalData that timed out under the old 2.5s race and left the real
+ * seed empty in a live run. Every resolved REAL point (isSynthetic:false) is
+ * streamed into the A* real-tile seed so the SELECTED path is guided by real
+ * pollution where available. A* is NEVER awaited on this: if a point has not
+ * resolved by the time A* evaluates a node, the cost uses marked synthetic.
+ * Keeps the 4-parallel pool + per-request timeout. Non-real responses are
+ * rejected at the seam (HARD RULE: never seed synthetic as real).
  * @returns {Promise} resolves when the coarse grid finishes (telemetry only;
  *                    callers MUST NOT await it before running A*).
  */
@@ -725,32 +802,57 @@ function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
     // Set the match radius up-front (also primes the seed before any point lands).
     EnvironmentalAStar.seedRealEnvTiles([], grid.matchRadiusM);
 
+    const REQUEST_TIMEOUT_MS = 6000;
+    const pathologies = encodeURIComponent(
+        (patientCondition && patientCondition.name) || 'default'
+    );
+
     async function fetchSeedPoint(pt) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
         try {
-            window.useRealTimeData = true;
-            const envData = await Promise.race([
-                Environmental.getEnvironmentalData(pt.lat, pt.lon, patientCondition),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('prefetch timeout')), 2500)
-                ),
-            ]);
-            if (envData && !envData.isDefault) {
-                // Stream this real point into the seed immediately (incremental):
-                // nodes evaluated after this lands will use it; earlier ones used
-                // synthetic — that's the non-blocking trade-off, by design.
+            const url =
+                `/api/environment?lat=${encodeURIComponent(pt.lat)}` +
+                `&lon=${encodeURIComponent(pt.lon)}&pathologies=${pathologies}`;
+            const response = await fetch(url, {
+                signal: controller.signal,
+                headers: { Accept: 'application/json' },
+            });
+            if (!response.ok) {
+                console.warn(
+                    `[prefetchRealEnv] /api/environment ${response.status} for ` +
+                    `(${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)})`
+                );
+                return false;
+            }
+            const payload = await response.json();
+            const point = (payload && payload.points && payload.points[0]) || payload;
+            const data = parseApiEnvironmentPoint(point);
+            if (data) {
+                // Stream this REAL point into the seed immediately (incremental):
+                // nodes evaluated after this lands use it; earlier ones used
+                // synthetic — the non-blocking trade-off, by design.
                 EnvironmentalAStar.seedRealEnvTiles(
-                    [{ lat: pt.lat, lon: pt.lon, data: envData }],
+                    [{ lat: pt.lat, lon: pt.lon, data }],
                     grid.matchRadiusM
                 );
                 console.log(
-                    `[prefetchRealEnv] seeded REAL point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)})`
+                    `[prefetchRealEnv] seeded REAL point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}) ` +
+                    `airQuality=${data.airQuality.toFixed(1)} (EAQI=${data.europeanAqi}) src=${data.source}`
                 );
                 return true;
             }
-        } catch (error) {
             console.warn(
-                `[prefetchRealEnv] point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}) failed: ${error.message}`
+                `[prefetchRealEnv] point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}) ` +
+                `returned no real air-quality — rejected (not seeded)`
             );
+        } catch (error) {
+            const reason = error.name === 'AbortError' ? 'timeout' : error.message;
+            console.warn(
+                `[prefetchRealEnv] point (${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}) failed: ${reason}`
+            );
+        } finally {
+            clearTimeout(timer);
         }
         return false;
     }
@@ -767,7 +869,8 @@ function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
     return Promise.all(Array.from({ length: concurrency }, () => worker()))
         .then(() => {
             console.log(
-                `[prefetchRealEnv] coarse pre-fetch done, seed size=${EnvironmentalAStar.getRealEnvSeedSize()}`
+                `[prefetchRealEnv] coarse pre-fetch done (/api/environment), ` +
+                `seed size=${EnvironmentalAStar.getRealEnvSeedSize()}`
             );
         })
         .catch((err) => {

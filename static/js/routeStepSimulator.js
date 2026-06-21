@@ -14,6 +14,8 @@
   const L = global.L;
   const ROUTE_PREVIEW_FOLLOW_ZOOM = 17;
   const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 80;
+  const ROUTE_PREVIEW_MIN_TOTAL_MS = 8000;
+  const ROUTE_PREVIEW_MAX_TOTAL_MS = 45000;
   const MIN_STEP_DURATION_MS = 1500;
   const MAX_STEP_DURATION_MS = 10000;
 
@@ -561,20 +563,23 @@
       return false;
     }
 
+    let totalLength = 0;
     segments.forEach((segment) => {
       segment.track = buildRoutePreviewTrack(segment.path);
-      if (typeof speedMps === 'number' && speedMps > 0 && segment.track.totalLength > 0) {
-        const durationMs = (segment.track.totalLength / speedMps) * 1000;
-        segment.durationMs = Math.max(
-          MIN_STEP_DURATION_MS,
-          Math.min(MAX_STEP_DURATION_MS, durationMs)
-        );
-      } else if (segment.track.totalLength <= 0) {
-        segment.durationMs = MIN_STEP_DURATION_MS;
-      } else {
-        segment.durationMs = stepDurationMs;
-      }
+      segment.startDistance = totalLength;
+      totalLength += segment.track.totalLength;
     });
+
+    let totalDurationMs;
+    if (typeof speedMps === 'number' && speedMps > 0 && totalLength > 0) {
+      totalDurationMs = (totalLength / speedMps) * 1000;
+    } else {
+      totalDurationMs = stepDurationMs * segments.length;
+    }
+    totalDurationMs = Math.max(
+      ROUTE_PREVIEW_MIN_TOTAL_MS,
+      Math.min(ROUTE_PREVIEW_MAX_TOTAL_MS, totalDurationMs)
+    );
 
     const items = directionsListElement
       ? Array.from(directionsListElement.querySelectorAll('.directions-step'))
@@ -596,7 +601,8 @@
       map,
       marker,
       followCamera,
-      stepDurationMs,
+      totalDurationMs,
+      totalLength,
       segments,
       items,
       onStepEnter,
@@ -624,46 +630,51 @@
     run.stepStartTime = startTime;
     focusRoutePreviewCamera(map, path[0], startTime, true, run);
 
+    function findSegmentIndexAtDistance(targetDistance) {
+      for (let i = 0; i < run.segments.length; i++) {
+        const segment = run.segments[i];
+        if (targetDistance >= segment.startDistance && targetDistance <= segment.startDistance + segment.track.totalLength) {
+          return i;
+        }
+      }
+      return run.segments.length - 1;
+    }
+
     const animate = (timestamp) => {
       if (!activeRun || activeRun !== run) {
         return;
       }
 
-      const segment = run.segments[run.currentStepIndex];
       const elapsed = timestamp - run.stepStartTime;
-      const linearProgress = Math.max(0, Math.min(1, elapsed / segment.durationMs));
-      const progress = easeInOutCubic(linearProgress);
-      const targetDistance = segment.track.totalLength * progress;
-      const previewPosition = interpolateRoutePreviewPosition(segment.track, targetDistance);
+      const globalProgress = Math.max(0, Math.min(1, elapsed / run.totalDurationMs));
+      const targetDistance = run.totalLength * globalProgress;
+      const segmentIndex = findSegmentIndexAtDistance(targetDistance);
+      const segment = run.segments[segmentIndex];
+      const segmentDistance = targetDistance - segment.startDistance;
+      const previewPosition = interpolateRoutePreviewPosition(segment.track, segmentDistance);
+
+      if (segmentIndex !== run.currentStepIndex) {
+        leaveCurrentStep(run);
+        enterStep(run, segmentIndex);
+      }
 
       run.marker.setLatLng(previewPosition);
       focusRoutePreviewCamera(map, previewPosition, timestamp, false, run);
 
-      if (progress < 1) {
+      if (globalProgress < 1) {
         run.animationFrame = requestFrame(animate);
         return;
       }
 
-      // Step finished.
+      run.animationFrame = null;
       leaveCurrentStep(run);
-
-      const nextIndex = run.currentStepIndex + 1;
-      if (nextIndex >= run.segments.length) {
-        run.animationFrame = null;
-        if (typeof run.onDone === 'function') {
-          try {
-            run.onDone();
-          } catch (error) {
-            console.warn('[RouteStepSimulator] onDone error:', error);
-          }
+      if (typeof run.onDone === 'function') {
+        try {
+          run.onDone();
+        } catch (error) {
+          console.warn('[RouteStepSimulator] onDone error:', error);
         }
-        return;
       }
-
-      enterStep(run, nextIndex);
-      run.stepStartTime = timestamp;
-      focusRoutePreviewCamera(map, previewPosition, timestamp, true, run);
-      run.animationFrame = requestFrame(animate);
     };
 
     run.animationFrame = requestFrame(animate);

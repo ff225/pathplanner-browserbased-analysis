@@ -8,7 +8,6 @@ waypoint + Mapbox/ORS flow in routePlanner.js.
 import heapq
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from .environmental_data_service import environmental_data_service
@@ -240,6 +239,55 @@ def get_poi_lists_for_grid(grid: List[Dict[str, float]]) -> Dict[str, List[Tuple
     return poi_lists
 
 
+def _poi_cell_size_meters_to_degrees(cell_size_m: float, lat: float) -> Tuple[float, float]:
+    """Approximate lat/lon cell sizes in degrees for a given metric cell size."""
+    lat_step = cell_size_m / 111320.0
+    lon_step = cell_size_m / (111320.0 * math.cos(math.radians(lat)))
+    return lat_step, lon_step
+
+
+def build_poi_spatial_index(
+    poi_list: List[Tuple[float, float]], cell_size_m: float = 200
+) -> Optional[Dict[str, Any]]:
+    """Bucket POIs by lat/lon cells for fast nearest-neighbor lookups."""
+    if not poi_list:
+        return None
+    first_lat = poi_list[0][0]
+    lat_step, lon_step = _poi_cell_size_meters_to_degrees(cell_size_m, first_lat)
+    cells: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    for lat, lon in poi_list:
+        key = (math.floor(lat / lat_step), math.floor(lon / lon_step))
+        cells.setdefault(key, []).append((lat, lon))
+    return {'cells': cells, 'lat_step': lat_step, 'lon_step': lon_step}
+
+
+def nearest_poi_distance_indexed(
+    node: Dict[str, float], spatial_index: Optional[Dict[str, Any]]
+) -> Optional[float]:
+    """Return min distance to a POI using the spatial index (checks own + neighbor cells)."""
+    if not spatial_index or not spatial_index['cells']:
+        return None
+    lat = node['lat']
+    lon = node['lon']
+    lat_step = spatial_index['lat_step']
+    lon_step = spatial_index['lon_step']
+    i = math.floor(lat / lat_step)
+    j = math.floor(lon / lon_step)
+    min_dist = float('inf')
+    found = False
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            cell = spatial_index['cells'].get((i + di, j + dj))
+            if not cell:
+                continue
+            for plat, plon in cell:
+                d = haversine_m(node, {'lat': plat, 'lon': plon})
+                if d < min_dist:
+                    min_dist = d
+                    found = True
+    return min_dist if found else None
+
+
 def nearest_poi_distance(node: Dict[str, float], poi_list: List[Tuple[float, float]]) -> Optional[float]:
     """Return the minimum haversine distance in meters from node to any POI."""
     if not poi_list:
@@ -249,29 +297,26 @@ def nearest_poi_distance(node: Dict[str, float], poi_list: List[Tuple[float, flo
     )
 
 
-def _compute_node_distances(
-    node: Dict[str, float], poi_lists: Dict[str, List[Tuple[float, float]]]
-) -> Tuple[str, Dict[str, Optional[float]]]:
-    """Worker: nearest POI distance for one grid node across all categories."""
-    distances: Dict[str, Optional[float]] = {}
-    for category, poi_list in poi_lists.items():
-        distances[category] = nearest_poi_distance(node, poi_list)
-    return _node_id(node), distances
-
-
 def precompute_poi_distances(
-    grid: List[Dict[str, float]], poi_lists: Dict[str, List[Tuple[float, float]]], max_workers: int = 4
+    grid: List[Dict[str, float]],
+    poi_lists: Dict[str, List[Tuple[float, float]]],
+    cell_size_m: float = 200,
 ) -> Dict[str, Dict[str, Optional[float]]]:
-    """Precompute nearest-POI distances for every grid node in parallel."""
+    """Precompute nearest-POI distances for every grid node using a spatial index."""
     if not grid or not poi_lists:
         return {}
 
+    spatial_indices = {
+        category: build_poi_spatial_index(poi_list, cell_size_m)
+        for category, poi_list in poi_lists.items()
+    }
+
     result: Dict[str, Dict[str, Optional[float]]] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for node_id, distances in executor.map(
-            lambda node: _compute_node_distances(node, poi_lists), grid
-        ):
-            result[node_id] = distances
+    for node in grid:
+        distances: Dict[str, Optional[float]] = {}
+        for category, index in spatial_indices.items():
+            distances[category] = nearest_poi_distance_indexed(node, index)
+        result[_node_id(node)] = distances
     return result
 
 

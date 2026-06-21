@@ -74,6 +74,7 @@ const LEVEL_THRESHOLDS = {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+    const GEOLOCATION_ENV_EVENT = 'pathplanner:geolocation-position';
     const elements = {
         refresh: document.getElementById('envInspectorRefresh'),
         aqi: document.getElementById('envInspectorAqi'),
@@ -94,6 +95,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const debouncedReload = debounce(() => {
         loadEnvironmentData();
     }, 350);
+
+    window.pathplannerEnvironmentInspector = {
+        ...(window.pathplannerEnvironmentInspector || {}),
+        loadForCoordinates(point, options = {}) {
+            return loadEnvironmentData({
+                ...options,
+                force: options.force !== false,
+                point,
+                contextLabel: options.contextLabel || 'User location'
+            });
+        }
+    };
+
+    window.addEventListener(GEOLOCATION_ENV_EVENT, (event) => {
+        const point = normalizeExplicitPoint(event.detail);
+        if (point) {
+            window.pathplannerLastGeolocationPoint = point;
+            loadEnvironmentData({ force: true, point, contextLabel: 'User location' });
+        }
+    });
 
     elements.refresh?.addEventListener('click', () => loadEnvironmentData({ force: true }));
     elements.patientCondition?.addEventListener('change', () => {
@@ -124,16 +145,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadEnvironmentData(options = {}) {
-        const point = getCurrentPoint();
+        const point = normalizeExplicitPoint(options.point) || getCurrentPoint();
+        const contextLabel = options.contextLabel || 'Map center';
         const pathologies = getSelectedPathologies();
         const requestKey = `${point.lat.toFixed(4)},${point.lon.toFixed(4)}:${pathologies.join(',')}`;
 
-        updateContext(point, pathologies);
+        updateContext(point, pathologies, contextLabel);
 
         // If we already have fresh cached data for this location/pathology, render it when open.
         if (!options.force && requestKey === cachedRequestKey && cachedPayload) {
             if (isOpen()) {
-                renderPayload(cachedPayload, point, pathologies);
+                renderPayload(cachedPayload, point, pathologies, contextLabel);
             }
             return;
         }
@@ -165,7 +187,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cachedPayload = payload;
             cachedRequestKey = requestKey;
             if (isOpen()) {
-                renderPayload(payload, point, pathologies);
+                renderPayload(payload, point, pathologies, contextLabel);
             }
         } catch (error) {
             if (error.name === 'AbortError') {
@@ -174,9 +196,14 @@ document.addEventListener('DOMContentLoaded', () => {
             cachedRequestKey = '';
             cachedPayload = null;
             if (isOpen()) {
-                renderError(error, point, pathologies);
+                renderError(error, point, pathologies, contextLabel);
             }
         }
+    }
+
+    const queuedGeolocationPoint = normalizeExplicitPoint(window.pathplannerLastGeolocationPoint);
+    if (queuedGeolocationPoint) {
+        loadEnvironmentData({ force: true, point: queuedGeolocationPoint, contextLabel: 'User location' });
     }
 
     function renderLoading(pathologies) {
@@ -197,7 +224,7 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
     }
 
-    function renderPayload(payload, point, requestedPathologies) {
+    function renderPayload(payload, point, requestedPathologies, contextLabel = 'Map center') {
         const pathologies = Array.isArray(payload.pathologies) && payload.pathologies.length
             ? payload.pathologies
             : requestedPathologies;
@@ -206,7 +233,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const availableCount = Object.values(pollutants).filter(isAvailableSample).length;
         const unavailableCount = Object.values(pollutants).filter((sample) => !isAvailableSample(sample)).length;
 
-        updateContext(point, pathologies);
+        updateContext(point, pathologies, contextLabel);
         renderAqi(overallAqi);
         renderMetricGroups(pathologies, pollutants);
 
@@ -219,8 +246,8 @@ document.addEventListener('DOMContentLoaded', () => {
         elements.status.textContent = `Endpoint reached, but every requested metric is ${UNAVAILABLE_TEXT} for this location/pathology.`;
     }
 
-    function renderError(error, point, pathologies) {
-        updateContext(point, pathologies);
+    function renderError(error, point, pathologies, contextLabel = 'Map center') {
+        updateContext(point, pathologies, contextLabel);
         elements.aqi.className = 'env-aqi-card env-aqi-card--unavailable';
         elements.aqi.innerHTML = `
             <div class="env-aqi-ring" aria-hidden="true"><span class="env-aqi-value">${UNAVAILABLE_TEXT}</span></div>
@@ -359,9 +386,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return groups;
     }
 
-    function updateContext(point, pathologies) {
+    function updateContext(point, pathologies, contextLabel = 'Map center') {
         elements.pathologies.textContent = `Pathology: ${pathologies.map(getPathologyLabel).join(' + ')}`;
-        elements.location.textContent = `Map center: ${point.lat.toFixed(4)}, ${point.lon.toFixed(4)}`;
+        elements.location.textContent = `${contextLabel}: ${point.lat.toFixed(4)}, ${point.lon.toFixed(4)}`;
     }
 
     function getSelectedPathologies() {
@@ -386,6 +413,20 @@ document.addEventListener('DOMContentLoaded', () => {
             return { lat: Number(center.lat), lon: Number(center.lng) };
         }
         return { lat: 44.645819, lon: 10.925719 };
+    }
+
+    function normalizeExplicitPoint(point) {
+        if (!point) {
+            return null;
+        }
+
+        const lat = Number(point.lat);
+        const lon = Number(point.lon ?? point.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return null;
+        }
+
+        return { lat, lon };
     }
 });
 

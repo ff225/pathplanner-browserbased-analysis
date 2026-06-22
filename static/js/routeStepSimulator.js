@@ -14,9 +14,21 @@
   const L = global.L;
   const ROUTE_PREVIEW_FOLLOW_ZOOM = 17;
   const ROUTE_PREVIEW_CAMERA_THROTTLE_MS = 80;
-  const ROUTE_PREVIEW_MIN_TOTAL_MS = 8000;
   const MIN_STEP_DURATION_MS = 1500;
   const MAX_STEP_DURATION_MS = 10000;
+
+  // Preview playback is intentionally ACCELERATED (not real walking/cycling
+  // speed) and PROPORTIONAL to total route length: longer route => longer
+  // preview, but always fast. Tuned so a ~2km route plays in ~8s.
+  const ROUTE_PREVIEW_SPEED_MPS = 250;
+  const ROUTE_PREVIEW_MIN_TOTAL_MS = 3000;
+  // Linear region cap: durations grow linearly with distance up to here.
+  const ROUTE_PREVIEW_SOFT_MAX_MS = 18000;
+  // Beyond the soft max, durations keep growing (so long routes still scale)
+  // but sublinearly, toward this absolute ceiling — no multi-minute animation.
+  const ROUTE_PREVIEW_HARD_MAX_MS = 30000;
+  // Controls how fast the sublinear (sqrt) region grows past the soft max.
+  const ROUTE_PREVIEW_SOFT_KNEE_K = 50;
 
   let activeRun = null;
 
@@ -518,6 +530,33 @@
   }
 
   // --------------------------------------------------------------------------
+  // Preview duration model
+  // --------------------------------------------------------------------------
+
+  // Accelerated, distance-proportional preview duration with a sublinear
+  // soft-knee so very long routes still scale up but stay watchable.
+  // Returns milliseconds. Pure function — used by start() and by node proofs.
+  function computeRoutePreviewDurationMs(totalLengthMeters) {
+    const length = Number(totalLengthMeters);
+    if (!Number.isFinite(length) || length <= 0) {
+      return ROUTE_PREVIEW_MIN_TOTAL_MS;
+    }
+
+    const linearMs = (length / ROUTE_PREVIEW_SPEED_MPS) * 1000;
+
+    let durationMs;
+    if (linearMs <= ROUTE_PREVIEW_SOFT_MAX_MS) {
+      durationMs = linearMs;
+    } else {
+      const overshoot = linearMs - ROUTE_PREVIEW_SOFT_MAX_MS;
+      durationMs = ROUTE_PREVIEW_SOFT_MAX_MS + Math.sqrt(overshoot) * ROUTE_PREVIEW_SOFT_KNEE_K;
+      durationMs = Math.min(durationMs, ROUTE_PREVIEW_HARD_MAX_MS);
+    }
+
+    return Math.max(ROUTE_PREVIEW_MIN_TOTAL_MS, durationMs);
+  }
+
+  // --------------------------------------------------------------------------
   // Public API
   // --------------------------------------------------------------------------
 
@@ -529,7 +568,6 @@
       route,
       directionsListElement,
       stepDurationMs = 15000,
-      speedMps,
       followCamera = true,
       onStepEnter,
       onStepLeave,
@@ -566,13 +604,13 @@
       totalLength += segment.track.totalLength;
     });
 
-    let totalDurationMs;
-    if (typeof speedMps === 'number' && speedMps > 0 && totalLength > 0) {
-      totalDurationMs = (totalLength / speedMps) * 1000;
-    } else {
-      totalDurationMs = stepDurationMs * segments.length;
-    }
-    totalDurationMs = Math.max(ROUTE_PREVIEW_MIN_TOTAL_MS, totalDurationMs);
+    // Distance-proportional, accelerated preview duration (see
+    // computeRoutePreviewDurationMs). totalLength is the real route length in
+    // meters; falls back to per-step pacing only when geometry has no length.
+    const totalDurationMs =
+      totalLength > 0
+        ? computeRoutePreviewDurationMs(totalLength)
+        : Math.max(ROUTE_PREVIEW_MIN_TOTAL_MS, stepDurationMs * segments.length);
 
     const items = directionsListElement
       ? Array.from(directionsListElement.querySelectorAll('.directions-step'))
@@ -684,5 +722,9 @@
     activeRun = null;
   }
 
-  global.RouteStepSimulator = { start, stop };
+  global.RouteStepSimulator = { start, stop, computeRoutePreviewDurationMs };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = global.RouteStepSimulator;
+  }
 })(globalThis);

@@ -2567,17 +2567,10 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
             window.RouteStepSimulator.stop();
             setPreviewControlsRunning(true);
 
-            const transportMode = document.getElementById('transportMode')?.value || 'walking';
-            const speedByMode = {
-                walking: 1.2,
-                cycling: 4,
-                driving: 12
-            };
             const started = window.RouteStepSimulator.start({
                 map,
                 route: selectedRoute,
                 directionsListElement: document.getElementById('directionsList'),
-                speedMps: speedByMode[transportMode] || speedByMode.walking,
                 followCamera: true,
                 onStepEnter: (index, el) => {
                     el.classList.add('directions-step--active');

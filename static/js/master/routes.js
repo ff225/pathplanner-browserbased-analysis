@@ -2788,6 +2788,33 @@ function formatScore(score) {
     return typeof score === 'number' ? score.toFixed(1) : "0.0";
 }
 
+// PP-PREVIEW-REGR-FIX: background-enrichment timeouts. The route panel/preview
+// render from geometry alone (see route() below), so these bound only the
+// background score/badge refresh — a dead or unreachable external API (Overpass
+// refused, noise API failed) can never hang or delay the visible UI.
+const ENV_SAMPLING_TIMEOUT_MS = 8000;
+const POI_FETCH_TIMEOUT_MS = 6000;
+
+// Race a promise against a timeout. On timeout OR rejection, resolves to
+// fallbackValue instead of hanging. Used to bound external env/POI calls.
+function withTimeout(promise, ms, fallbackValue, label) {
+    let timer;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => {
+            console.warn(`[withTimeout] ${label} exceeded ${ms}ms — using fallback so the route UI is never blocked.`);
+            resolve(fallbackValue);
+        }, ms);
+    });
+    const guarded = Promise.resolve(promise)
+        .then((value) => { clearTimeout(timer); return value; })
+        .catch((error) => {
+            clearTimeout(timer);
+            console.warn(`[withTimeout] ${label} failed — using fallback:`, error);
+            return fallbackValue;
+        });
+    return Promise.race([guarded, timeout]);
+}
+
 async function route(
     currentRouting = {
         routingControl: null,
@@ -2854,6 +2881,10 @@ async function route(
 
     // Ensure allRoutes is initialized here and accessible to handleOnRouteFound
     const allRoutes = [];
+    // PP-PREVIEW-REGR-FIX: track the per-route enrichment (env+POI+scoring)
+    // promises so the panel can render from geometry immediately while scores +
+    // the env-quality badge are refreshed in the background once they settle.
+    const enrichmentPromises = [];
     let currentRoute = {
         score: -Infinity, environmentScore: null, routingControl: null,
         route: null, length: null, poiCounts: null
@@ -2927,7 +2958,14 @@ async function route(
                 try {
                     // Force refresh on retries
                     const forceRefresh = retryCount > 0;
-                    environmentDataList = await Environmental.getRouteEnvironmentalData(routePath, currentPatientCondition, forceRefresh);
+                    // PP-PREVIEW-REGR-FIX: bound env sampling so an unreachable
+                    // API cannot hang the background refresh (returns [] on timeout).
+                    environmentDataList = await withTimeout(
+                        Environmental.getRouteEnvironmentalData(routePath, currentPatientCondition, forceRefresh),
+                        ENV_SAMPLING_TIMEOUT_MS,
+                        [],
+                        `env sampling for ${createdRoute.routeName}`
+                    );
 
                     // Check if we have enough real API data
                     if (environmentDataList && environmentDataList.length > 0) {
@@ -3008,7 +3046,14 @@ async function route(
             console.log(`[handleOnRouteFound] Awaiting background POI data for ${createdRoute.routeName}`);
             let poiData;
             try {
-                poiData = await poiPromise;
+                // PP-PREVIEW-REGR-FIX: bound POI fetch (Overpass) so a dead API
+                // can never hang the background refresh.
+                poiData = await withTimeout(
+                    poiPromise,
+                    POI_FETCH_TIMEOUT_MS,
+                    createMinimalPOIData(),
+                    `POI fetch for ${createdRoute.routeName}`
+                );
             } catch (poiError) {
                 console.error(`[handleOnRouteFound] Error fetching POI data for ${createdRoute.routeName}:`, poiError);
                 // Use minimal POI data if API call fails
@@ -3111,8 +3156,11 @@ async function route(
                     window.updateDownloadButtonText();
                 }
 
-	                // Set up the route control panel
-	                setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+	                // PP-PREVIEW-REGR-FIX: the control panel is no longer rendered
+	                // here (which only happened after env+POI+scoring for ALL routes
+	                // and would never run when an external API hung). The panel now
+	                // renders from geometry in showBestRoute() and is refreshed with
+	                // real scores by the background Promise.allSettled handler below.
 	            }
         } catch (error) {
             console.error(`[handleOnRouteFound] Error processing route ${createdRoute.routeName}:`, error);
@@ -3242,15 +3290,16 @@ async function route(
                             ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
                             routingControl: directRouteControl
                         };
-                        // PP-LOAD-PERF: await scoring so the promise (and thus
-                        // showBestRoute / badge resolve) does not race ahead of
-                        // env+POI+scoring. The overlay still closes early because
-                        // closeOverlayAtFirstPolyline() runs at handleOnRouteFound entry.
-                        try {
-                            await handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
-                        } catch (err) {
-                            console.error('[route-async-block] Direct route handleOnRouteFound failed:', err);
-                        }
+                        // PP-PREVIEW-REGR-FIX: do NOT await enrichment before
+                        // resolving. handleOnRouteFound captures the geometry and
+                        // pushes the route into allRoutes synchronously (before its
+                        // first await), so the panel can render immediately from
+                        // geometry. Env+POI+scoring run in the background; the promise
+                        // is tracked so scores + the env badge refresh once they settle.
+                        enrichmentPromises.push(
+                            handleOnRouteFound(e, directRouteControl, createdRoute, waypoints)
+                                .catch((err) => console.error('[route-async-block] Direct route enrichment failed:', err))
+                        );
                         resolveRoutePromise(true);
                     });
                     directRouteControl.on('routingerror', (e) => { console.error("Direct route error:", e); resolveRoutePromise(false); });
@@ -3287,12 +3336,11 @@ async function route(
                                 ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
                                 routingControl: altRouteControl
                             };
-                            // PP-LOAD-PERF: await scoring before resolving (see direct-route note above).
-                            try {
-                                await handleOnRouteFound(e, altRouteControl, createdRoute, altRouteWaypointsForControl); // Pass 'altRouteWaypointsForControl'
-                            } catch (err) {
-                                console.error(`[route-async-block] Alt route ${pattern.name} handleOnRouteFound failed:`, err);
-                            }
+                            // PP-PREVIEW-REGR-FIX: track enrichment in the background; resolve on geometry.
+                            enrichmentPromises.push(
+                                handleOnRouteFound(e, altRouteControl, createdRoute, altRouteWaypointsForControl)
+                                    .catch((err) => console.error(`[route-async-block] Alt route ${pattern.name} enrichment failed:`, err))
+                            );
                             resolveRoutePromise(true);
                         });
                         altRouteControl.on('routingerror', (e) => { console.error(`Alt route ${pattern.name} error:`, e); resolveRoutePromise(false); });
@@ -3324,7 +3372,11 @@ async function route(
                             ...GenericUtils.createRoute(waypointInputs.start, waypointInputs.end),
                             routingControl: directRouteControl
                         };
-                        await handleOnRouteFound(e, directRouteControl, createdRoute, waypoints); // Pass 'waypoints'
+                        // PP-PREVIEW-REGR-FIX: track enrichment in the background; resolve on geometry.
+                        enrichmentPromises.push(
+                            handleOnRouteFound(e, directRouteControl, createdRoute, waypoints)
+                                .catch((err) => console.error('[route-async-block] Non-patient direct route enrichment failed:', err))
+                        );
                         resolveRoutePromise(true);
                     });
 
@@ -3359,7 +3411,31 @@ async function route(
             console.log("[route-async-block] Best route selected:", currentRoute.routeName, "Score:", currentRoute.score);
 
             // Display routes in UI instead of calling the problematic displayBestRoute function
+            // PP-PREVIEW-REGR-FIX: this renders the panel + preview + directions tab
+            // from route geometry alone, so they appear immediately and no longer wait
+            // on env/POI/scoring (which were hanging the UI when Overpass was down).
             showBestRoute();
+
+            // PP-PREVIEW-REGR-FIX: refresh scores + resolve the env-quality badge in
+            // the BACKGROUND once enrichment settles. allSettled (not all) so one
+            // route's failure never blocks the refresh; per-call timeouts inside
+            // handleOnRouteFound guarantee these promises always settle promptly.
+            Promise.allSettled(enrichmentPromises).then(() => {
+                try {
+                    if (allRoutes.length > 0) {
+                        deduplicateRoutesForComparison(allRoutes, map, currentRouting);
+                        currentRoute = selectBestRoute(allRoutes, currentPatientCondition) || currentRoute;
+                        setupRouteControlPanel(map, allRoutes, currentRouting, currentPatientCondition, currentPreferences, csvData);
+                        const { status, text } = envQualityBadgeFromRoute(currentRoute);
+                        resolveEnvQualityBadge(runToken, status, text);
+                    } else {
+                        resolveEnvQualityBadge(runToken, 'unavailable', 'Qualità ambientale non disponibile');
+                    }
+                } catch (refreshErr) {
+                    console.error('[route] Background enrichment refresh failed:', refreshErr);
+                    resolveEnvQualityBadge(runToken, 'unavailable', 'Qualità ambientale non disponibile');
+                }
+            });
 
             // A local function to show the best route
             function showBestRoute() {
@@ -3394,10 +3470,11 @@ async function route(
                 LoadingScreen.hide(document);
                 console.log("[route] LoadingScreen hidden after setupRouteControlPanel");
 
-                // PP-LOAD-PERF: env quality is now fully computed — resolve the
-                // non-blocking badge in place (anti-stale guarded by runToken).
-                const { status, text } = envQualityBadgeFromRoute(currentRoute);
-                resolveEnvQualityBadge(runToken, status, text);
+                // PP-PREVIEW-REGR-FIX: the env-quality badge is NOT resolved here —
+                // at this point the panel renders from geometry only and env scoring
+                // is still running in the background. The badge (anti-stale guarded
+                // by runToken) is resolved by the Promise.allSettled handler below,
+                // once env+POI enrichment has settled.
             }
 
         } catch (errorInAsyncBlock) {
@@ -3523,6 +3600,10 @@ async function routeWithPrecalculatedRoutes(
 
         // Create Leaflet routing controls for each pre-calculated route
         for (let i = 0; i < preCalculatedRoutes.length; i++) {
+          // PP-PREVIEW-REGR-FIX: isolate each route so one route's failure is
+          // skipped (and logged) instead of aborting the whole batch and skipping
+          // setupRouteControlPanel for every route.
+          try {
             const route = preCalculatedRoutes[i];
 
             console.log(`[routeWithPrecalculatedRoutes] Processing route ${i+1}: ${route.name}`);
@@ -3557,13 +3638,19 @@ async function routeWithPrecalculatedRoutes(
             if (!route.environmentDataList || route.environmentDataList.length === 0) {
                 console.log(`[routeWithPrecalculatedRoutes] Generating synthetic environmental data for route ${i+1}`);
 
-                // Create synthetic environmental data for this route
-                environmentDataList = createLocationBasedEnvironmentalData(
+                // PP-PREVIEW-REGR-FIX: previously called the non-exported,
+                // single-point createLocationBasedEnvironmentalData(lat,lon,cond)
+                // with a (coordsArray, 20) signature → ReferenceError that aborted
+                // the whole panel. Use the qualified list generator (returns an array
+                // of points, each flagged isSynthetic:true — no fabricated data shown
+                // as real).
+                environmentDataList = Environmental.createSyntheticEnvironmentalDataList(
                     route.coordinates || [
                         { lat: waypointInputs.start.lat, lng: waypointInputs.start.lon },
                         { lat: waypointInputs.end.lat, lng: waypointInputs.end.lon }
                     ],
-                    20 // Generate 20 data points along the route
+                    20, // Generate up to 20 data points along the route
+                    currentPatientCondition
                 );
             } else {
                 // Use existing environmental data
@@ -3659,6 +3746,10 @@ async function routeWithPrecalculatedRoutes(
                     i
                 );
                 addRouteDataToCsv(routeExportData, csvData, 'routeWithPrecalculatedRoutes');
+          } catch (routeErr) {
+              console.warn(`[routeWithPrecalculatedRoutes] Skipping route ${i+1} due to error (the panel still renders the remaining routes):`, routeErr);
+              continue;
+          }
 	        }
 
             deduplicateRoutesForComparison(allRoutes, map, currentRouting);

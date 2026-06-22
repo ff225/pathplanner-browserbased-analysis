@@ -1272,8 +1272,45 @@ function createLocationBasedEnvironmentalData(lat, lon, patientCondition) {
     if (regionData) {
         return { ...baseData, ...regionData, isRegionData: true };
     }
-    
+
     return baseData;
+}
+
+/**
+ * Create a LIST of synthetic environmental data points sampled along a route.
+ * Last-resort fallback used when no real environmental data is available (e.g.
+ * external APIs unreachable). Every point is explicitly flagged isSynthetic:true
+ * so the UI never presents fabricated values as real.
+ * @param {Array<{lat:number, lng?:number, lon?:number}>} coordinates - route coordinates
+ * @param {Number} [numPoints=20] - max number of points to sample along the route
+ * @param {Object} [patientCondition] - patient condition for region-aware synthesis
+ * @returns {Array<Object>} array of synthetic env data points (isSynthetic:true)
+ */
+export function createSyntheticEnvironmentalDataList(coordinates, numPoints = 20, patientCondition = null) {
+    if (!Array.isArray(coordinates) || coordinates.length === 0) {
+        return [];
+    }
+    const sampleCount = Math.max(1, Math.min(numPoints, coordinates.length));
+    const step = coordinates.length / sampleCount;
+    const points = [];
+    for (let i = 0; i < sampleCount; i++) {
+        const coord = coordinates[Math.min(coordinates.length - 1, Math.floor(i * step))];
+        if (!coord) continue;
+        const lat = typeof coord.lat === 'number' ? coord.lat : coord[1];
+        const lon = typeof coord.lng === 'number' ? coord.lng
+            : (typeof coord.lon === 'number' ? coord.lon : coord[0]);
+        if (typeof lat !== 'number' || typeof lon !== 'number' || Number.isNaN(lat) || Number.isNaN(lon)) {
+            continue;
+        }
+        const point = createLocationBasedEnvironmentalData(lat, lon, patientCondition);
+        // Force the synthetic flags explicit even if region data merged in, and
+        // attach the coordinate so downstream mappers can locate the point.
+        point.isSynthetic = true;
+        point.isDefault = true;
+        point.coordinate = { lat, lng: lon };
+        points.push(point);
+    }
+    return points;
 }
 
 // Helper function to calculate environmental score for a data point

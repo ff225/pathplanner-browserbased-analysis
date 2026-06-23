@@ -1,0 +1,18 @@
+[Unit]
+Description=PathPlanner Gunicorn service
+After=network.target
+
+[Service]
+User=pathplanner
+Group=www-data
+WorkingDirectory=/opt/pathplanner/app
+EnvironmentFile=/etc/pathplanner/pathplanner.env
+Environment=DJANGO_STATIC_ROOT=/opt/pathplanner/app/staticfiles
+Environment=DJANGO_MEDIA_ROOT=/opt/pathplanner/app/uploads
+Environment=DJANGO_SQLITE_PATH=/opt/pathplanner/data/db.sqlite3
+ExecStart=/opt/pathplanner/venv/bin/gunicorn core.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120 --access-logfile - --error-logfile -
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

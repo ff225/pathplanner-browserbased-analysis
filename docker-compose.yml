@@ -1,0 +1,42 @@
+services:
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - ${PATHPLANNER_ENV_FILE:-.env}
+    environment:
+      DJANGO_DEBUG: "0"
+      DJANGO_STATIC_ROOT: /app/staticfiles
+      DJANGO_MEDIA_ROOT: /app/uploads
+      DJANGO_SQLITE_PATH: /app/data/db.sqlite3
+    volumes:
+      - pathplanner-db:/app/data
+      - pathplanner-static:/app/staticfiles
+      - pathplanner-uploads:/app/uploads
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/map/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx/pathplanner-docker.conf:/etc/nginx/conf.d/default.conf:ro
+      - pathplanner-static:/srv/pathplanner/staticfiles:ro
+      - pathplanner-uploads:/srv/pathplanner/uploads:ro
+
+volumes:
+  pathplanner-db:
+  pathplanner-static:
+  pathplanner-uploads:

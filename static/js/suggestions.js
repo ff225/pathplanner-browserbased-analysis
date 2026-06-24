@@ -144,7 +144,7 @@ document.addEventListener("DOMContentLoaded", function() {
         return properties.full_address || properties.name || properties.place_formatted || '';
     }
 
-    async function retrieveSuggestion(mapboxId, input) {
+    async function retrieveSuggestion(mapboxId, input, preferredLabel) {
         if (!mapboxAccessToken) {
             showLookupConfigurationError();
             return false;
@@ -175,7 +175,11 @@ document.addEventListener("DOMContentLoaded", function() {
                 throw new Error('Mapbox retrieve response did not include coordinates');
             }
 
-            input.value = getFeatureLabel(feature) || input.value;
+            // PP-GUI-FIX: show the place the user actually selected (e.g.
+            // "Stazione Ferroviaria di Modena"). The Mapbox retrieve response often
+            // returns a coarser full_address ("41121 Modena, Italy") for POIs, which
+            // replaced the clicked name and made the arrival field confusing.
+            input.value = preferredLabel || getFeatureLabel(feature) || input.value;
             setInputCoordinates(input, coordinates.latitude, coordinates.longitude);
             rotateSearchSession(input);
             return true;
@@ -287,6 +291,9 @@ document.addEventListener("DOMContentLoaded", function() {
             item.className = 'suggestion-item';
             item.dataset.mapboxId = suggestion.mapbox_id;
             item.setAttribute('aria-label', detail ? `${title}, ${detail}` : title);
+            // PP-GUI-FIX: native tooltip so long names are fully readable in the
+            // compact sidebar even if the row wraps/clips.
+            item.title = detail && detail !== title ? `${title} — ${detail}` : title;
 
             const textWrapper = document.createElement('span');
             textWrapper.className = 'suggestion-text';
@@ -306,7 +313,7 @@ document.addEventListener("DOMContentLoaded", function() {
             item.appendChild(textWrapper);
             item.addEventListener('click', async () => {
                 item.disabled = true;
-                const retrieved = await retrieveSuggestion(item.dataset.mapboxId, input);
+                const retrieved = await retrieveSuggestion(item.dataset.mapboxId, input, title);
                 item.disabled = false;
 
                 if (retrieved) {

@@ -161,17 +161,24 @@ body {
 @media (min-width: 992px) {
     .sidebar-toggle {
         top: 50%;
-        left: calc(18.75vw - 17px);
+        /* PP-GUI-FIX: track the sidebar's real (clamped) edge, not raw 18.75vw */
+        left: calc(clamp(17.5rem, 18.75vw, 22.5rem) - 17px);
     }
 
+    /* PP-GUI-FIX: the compact sidebar was 18.75% of the viewport, which on
+       ~1280px-class screens shrinks to ~240px and clips input placeholders and
+       select labels. Clamp it to a readable minimum (17.5rem) while keeping the
+       18.75% target on large screens and capping growth on ultra-wide displays. */
     .map-shell .sidebar {
-        flex: 0 0 18.75%;
-        max-width: 18.75%;
+        flex: 0 0 clamp(17.5rem, 18.75%, 22.5rem);
+        max-width: 22.5rem;
     }
 
+    /* Let the map panel absorb whatever the sidebar does not take, so the
+       clamped minimum width never overflows the row. */
     .map-shell .sidebar + .p-0 {
-        flex: 0 0 81.25%;
-        max-width: 81.25%;
+        flex: 1 1 0;
+        max-width: none;
     }
 }
 

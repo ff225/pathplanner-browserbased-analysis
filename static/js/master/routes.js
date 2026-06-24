@@ -3573,8 +3573,11 @@ async function route(
                         addRouteDataToCsv(routeExportData, csvData, 'handleOnRouteFound');
 	                });
 
-                // Show notification that routes are ready for download
-                toastr.success(`${allRoutes.length} routes collected for ${currentPatientCondition.name} condition. Click Download to export.`);
+                // PP-GUI-FIX: the success toast was removed from here. handleOnRouteFound
+                // runs once per 'routesfound' event, which Leaflet/Mapbox re-fires several
+                // times per compute, so this produced a stack of identical toasts. The
+                // single user-facing success toast now lives in the route() finally block
+                // (runs exactly once per route computation).
 
                 // Update download button if function exists
                 if (typeof window.updateDownloadButtonText === 'function') {
@@ -3663,7 +3666,9 @@ async function route(
             } else {
                 numberOfRoutes = Math.min(2, numberOfRoutes);
             }
-            toastr.info(`Calculating optimal ${currentPatientCondition.name} route...`);
+            // PP-GUI-FIX: removed the "Calculating optimal route" info toast — the
+            // blocking loading overlay already communicates in-progress state, and
+            // this toast was one of several that stacked on every route compute.
 
             const routePromises = []; // Define routePromises here
 
@@ -3961,8 +3966,10 @@ async function route(
                     addRouteDataToCsv(routeData, window.csvData, 'route');
 	            });
 
-            // Show a notification
-            toastr.success(`${allRoutes.length} routes collected. Total in CSV: ${window.csvData.length}`);
+            // PP-GUI-FIX: this is now the SINGLE success toast for a route compute.
+            // The route() finally block runs exactly once per run, so the user sees
+            // one clear notification instead of a stack of duplicates.
+            toastr.success(`Route ready — ${allRoutes.length} route${allRoutes.length === 1 ? '' : 's'} collected. Click Download to export.`);
 
             // Update the download button
             if (typeof window.updateDownloadButtonText === 'function') {

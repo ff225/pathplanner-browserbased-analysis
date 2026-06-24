@@ -126,6 +126,229 @@ function getRouteLineLayer(route) {
     return route.routingControl._line || null;
 }
 
+const managedRoutingControls = new Set();
+let routingSessionCounter = 0;
+
+function registerRoutingControl(control) {
+    if (control) {
+        managedRoutingControls.add(control);
+    }
+    return control;
+}
+
+function isRoutingControlOnMap(control, map) {
+    return Boolean(
+        control &&
+        (control._map || (map && typeof map.hasLayer === 'function' && map.hasLayer(control)))
+    );
+}
+
+function addRoutingControlToMap(control, map, currentRouting) {
+    if (!control || !map) {
+        return;
+    }
+
+    try {
+        if (!isRoutingControlOnMap(control, map) && typeof control.addTo === 'function') {
+            control.addTo(map);
+        }
+        registerRoutingControl(control);
+        if (currentRouting && Array.isArray(currentRouting.routingControls) && !currentRouting.routingControls.includes(control)) {
+            currentRouting.routingControls.push(control);
+        }
+    } catch (error) {
+        console.warn('[addRoutingControlToMap] Error adding route control:', error);
+    }
+}
+
+function collectLayerAndChildren(layer, collected) {
+    if (!layer || collected.has(layer)) {
+        return;
+    }
+
+    collected.add(layer);
+    if (typeof layer.getLayers === 'function') {
+        layer.getLayers().forEach(child => collectLayerAndChildren(child, collected));
+    } else if (layer._layers && typeof layer._layers === 'object') {
+        Object.values(layer._layers).forEach(child => collectLayerAndChildren(child, collected));
+    }
+}
+
+function getRoutingControlLineLayers(control) {
+    const collected = new Set();
+    [
+        control?._line,
+        control?._selectedRoute?.line,
+        ...(Array.isArray(control?._routes) ? control._routes.map(route => route?.line) : [])
+    ].forEach(layer => collectLayerAndChildren(layer, collected));
+    return Array.from(collected);
+}
+
+function removeLayerFromMap(layer, map, label) {
+    if (!layer) {
+        return;
+    }
+
+    try {
+        const layerMap = layer._map || map;
+        if (layerMap && typeof layerMap.removeLayer === 'function') {
+            layerMap.removeLayer(layer);
+        } else if (map && typeof map.hasLayer === 'function' && map.hasLayer(layer)) {
+            map.removeLayer(layer);
+        }
+    } catch (error) {
+        console.warn(`[${label}] Error removing Leaflet layer:`, error);
+    }
+}
+
+function clearRoutingControlLineReferences(control) {
+    if (!control) {
+        return;
+    }
+
+    control._line = null;
+    if (Array.isArray(control._routes)) {
+        control._routes.forEach(route => {
+            if (route) {
+                route.line = null;
+            }
+        });
+    }
+    if (control._selectedRoute) {
+        control._selectedRoute.line = null;
+    }
+}
+
+function removeRoutingControlLines(control, map) {
+    getRoutingControlLineLayers(control).forEach(line => {
+        removeLayerFromMap(line, map, 'removeRoutingControlLines');
+    });
+    clearRoutingControlLineReferences(control);
+}
+
+function hideAndDetachRoutingControlContainer(control) {
+    const container = control?._container;
+    if (!container) {
+        return;
+    }
+
+    if (typeof $ === 'function') {
+        $(container).hide();
+    } else {
+        container.style.display = 'none';
+    }
+    if (container.parentNode) {
+        container.parentNode.removeChild(container);
+    }
+}
+
+function removeRoutingControlArtifacts(control, map, options = {}) {
+    if (!control) {
+        return;
+    }
+
+    const { clearWaypoints = true, unregister = true } = options;
+    removeRoutingControlLines(control, map);
+
+    try {
+        const controlMap = control._map || map;
+        if (controlMap && typeof controlMap.removeControl === 'function') {
+            controlMap.removeControl(control);
+        }
+    } catch (error) {
+        console.warn('[removeRoutingControlArtifacts] Error removing route control:', error);
+    }
+
+    hideAndDetachRoutingControlContainer(control);
+
+    if (clearWaypoints) {
+        try {
+            if (control.getPlan) {
+                control.getPlan().setWaypoints([]);
+            }
+        } catch (error) {
+            console.warn('[removeRoutingControlArtifacts] Error clearing route waypoints:', error);
+        }
+    }
+
+    if (unregister) {
+        managedRoutingControls.delete(control);
+    }
+}
+
+function clearDirectionsSidebarRouteUi() {
+    const panel = document.getElementById('directionsPanel');
+    const list = document.getElementById('directionsList');
+    const summary = document.getElementById('directionsSummary');
+    const empty = document.getElementById('directionsEmpty');
+    const onRouteContent = document.getElementById('onRouteContent');
+
+    if (summary) {
+        summary.innerHTML = '';
+    }
+    if (list) {
+        list.innerHTML = '';
+    }
+    if (empty) {
+        empty.hidden = false;
+    }
+    const title = panel?.querySelector?.('.directions-title');
+    if (title) {
+        title.textContent = 'Turn-by-turn';
+    }
+    if (onRouteContent) {
+        clearElementChildren(onRouteContent);
+    }
+    if (_onRoutePoiMarkerLayer) {
+        _onRoutePoiMarkerLayer.clearLayers();
+    }
+}
+
+function clearCurrentRoutingLayers(map, currentRouting, options = {}) {
+    const { clearUi = true, clearWaypoints = true } = options;
+    const controls = new Set(managedRoutingControls);
+
+    if (currentRouting?.routingControl) {
+        controls.add(currentRouting.routingControl);
+    }
+    if (Array.isArray(currentRouting?.routingControls)) {
+        currentRouting.routingControls.forEach(control => controls.add(control));
+    }
+
+    controls.forEach(control => removeRoutingControlArtifacts(control, map, { clearWaypoints }));
+    if (currentRouting) {
+        currentRouting.routingControl = null;
+        currentRouting.routingControls = [];
+    }
+
+    if (map) {
+        stopRoutePreview(map, { restoreView: false });
+    }
+    window.RouteStepSimulator && window.RouteStepSimulator.stop();
+
+    if (window.routeInfoLabels) {
+        window.routeInfoLabels.forEach(label => removeLayerFromMap(label, map, 'clearCurrentRoutingLayers'));
+        window.routeInfoLabels = [];
+    }
+
+    if (clearUi) {
+        clearRouteSelectorContainer();
+    }
+}
+
+function beginRoutingSession(map, currentRouting) {
+    const sessionId = ++routingSessionCounter;
+    if (currentRouting) {
+        currentRouting.routeSessionId = sessionId;
+    }
+    clearCurrentRoutingLayers(map, currentRouting);
+    return sessionId;
+}
+
+function isActiveRoutingSession(currentRouting, sessionId) {
+    return Boolean(sessionId && currentRouting && currentRouting.routeSessionId === sessionId);
+}
+
 function syncRoutingControlLineOptions(route, isSelected) {
     if (!route || !route.routingControl) {
         return;
@@ -1307,14 +1530,6 @@ function removeRouteControlFromMap(route, map, currentRouting) {
 
     const control = route.routingControl;
 
-    try {
-        if (map && typeof map.hasLayer === 'function' && map.hasLayer(control)) {
-            map.removeControl(control);
-        }
-    } catch (error) {
-        console.warn('[removeRouteControlFromMap] Error removing route control:', error);
-    }
-
     if (currentRouting && Array.isArray(currentRouting.routingControls)) {
         const controlIndex = currentRouting.routingControls.indexOf(control);
         if (controlIndex > -1) {
@@ -1322,32 +1537,7 @@ function removeRouteControlFromMap(route, map, currentRouting) {
         }
     }
 
-    if (control._container) {
-        if (typeof $ === 'function') {
-            $(control._container).hide();
-        } else {
-            control._container.style.display = 'none';
-        }
-    }
-
-    [control._line, getRouteLineLayer(route), control._routes?.[0]?.line].forEach(line => {
-        try {
-            if (line && map && typeof map.hasLayer === 'function' && map.hasLayer(line)) {
-                map.removeLayer(line);
-            }
-        } catch (error) {
-            console.warn('[removeRouteControlFromMap] Error removing route line:', error);
-        }
-    });
-
-    try {
-        if (control.getPlan) {
-            control.getPlan().setWaypoints([]);
-        }
-    } catch (error) {
-        console.warn('[removeRouteControlFromMap] Error clearing route waypoints:', error);
-    }
-
+    removeRoutingControlArtifacts(control, map, { clearWaypoints: true });
     route.removedFromMap = true;
 }
 
@@ -1518,6 +1708,8 @@ function createMapboxRouter(profile = 'walking') {
 function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon) {
     console.warn("No optimized routes found or primary routing failed, displaying direct route with Mapbox as fallback.");
     try {
+        clearCurrentRoutingLayers(map, currentRouting);
+
         const startLatLng = L.latLng(startLat || 44.6471, startLon || 10.6292);
         const endLatLng = L.latLng(endLat || 44.6499, endLon || 10.6368);
 
@@ -1546,6 +1738,26 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
             toastr.error("Could not calculate any route between these points.");
         });
 
+        fallbackControl.on('routesfound', function(e) {
+            const routePath = e.routes?.[0];
+            if (!routePath) {
+                return;
+            }
+            renderDirectionsSidebar({
+                routeName: 'Direct fallback route',
+                isDirectRoute: true,
+                route: routePath,
+                length: routePath.summary?.totalDistance,
+                duration: routePath.summary?.totalTime,
+                instructions: Array.isArray(routePath.instructions) ? routePath.instructions : [],
+                coordinates: routePath.coordinates || [],
+                routingControl: fallbackControl,
+                waypoints: [startLatLng, endLatLng],
+                originalWaypoints: [startLatLng, endLatLng]
+            });
+        });
+
+        registerRoutingControl(fallbackControl);
         currentRouting.routingControls.push(fallbackControl);
         toastr.info("Showing direct route as fallback.");
     } catch (error) {
@@ -2363,6 +2575,7 @@ function clearRouteSelectorContainer() {
     if (container) {
         container.innerHTML = '';
     }
+    clearDirectionsSidebarRouteUi();
     // Preview/stop now live in the Indicazioni pane, not the selector — wipe them
     // too on every cleanup path so no orphan buttons linger when routes drop to 0.
     const previewControls = getDirectionsPreviewControlsContainer();
@@ -2390,21 +2603,10 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
     // Remove existing route selector content from the directions panel
     clearRouteSelectorContainer();
 
-    // Aggressively remove all existing routing controls from the map first
-    // This ensures a clean slate before adding the new ones if routes were from a *previous* search.
-    if (currentRouting.routingControls && currentRouting.routingControls.length > 0) {
-        currentRouting.routingControls.forEach(control => {
-            if (control && map.hasLayer(control)) {
-                try {
-                    map.removeControl(control);
-                    console.log(`[setupRouteControlPanel] Aggressively removed old control.`);
-                } catch (e) {
-                    console.warn(`[setupRouteControlPanel] Error aggressively removing old control:`, e);
-                }
-            }
-        });
-    }
-    currentRouting.routingControls = []; // Reset for the new set of routes
+    // Aggressively remove existing route controls and their lines before adding
+    // back the selected current route. Do not wipe waypoints here: newly-created
+    // controls are also normalized through this path before panel selection.
+    clearCurrentRoutingLayers(map, currentRouting, { clearUi: false, clearWaypoints: false });
     routes = deduplicateRoutesForComparison(routes, map, currentRouting);
 
     if (routes.length === 0) {
@@ -2434,10 +2636,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                 syncRoutingControlLineOptions(route, index === initialSelectedIndex);
                 if (index === initialSelectedIndex) {
                     console.log(`[setupRouteControlPanel] Initially adding selected route line ${index}: ${route.routeName || route.name}`);
-                    if (!map.hasLayer(route.routingControl)) {
-                        route.routingControl.addTo(map);
-                        currentRouting.routingControls.push(route.routingControl); // Add to managed list
-                    }
+                    addRoutingControlToMap(route.routingControl, map, currentRouting);
                     if (route.routingControl._container) {
                         $(route.routingControl._container).hide();
                     }
@@ -2450,15 +2649,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                     // For non-selected routes, ensure their controls are NOT on the map
                     // and containers are hidden. They will be added if selected later.
                     console.log(`[setupRouteControlPanel] Initially ensuring route ${index} (${route.routeName || route.name}) is HIDDEN and REMOVED`);
-                    if (map.hasLayer(route.routingControl)) {
-                        map.removeControl(route.routingControl);
-                    }
-                    if (route.routingControl._container) {
-                        $(route.routingControl._container).hide();
-                    }
-                    if (routeLine && map.hasLayer(routeLine)) {
-                        map.removeLayer(routeLine);
-                    }
+                    removeRouteControlFromMap(route, map, currentRouting);
                     route.removedFromMap = true;
                 }
             } catch (e) {
@@ -2679,12 +2870,7 @@ function setupRouteControlPanel(map, routes, currentRouting, currentPatientCondi
                                     }
                                 }
 
-                                if (!map.hasLayer(r.routingControl)) {
-                                    r.routingControl.addTo(map);
-                                    if (!currentRouting.routingControls.includes(r.routingControl)) {
-                                        currentRouting.routingControls.push(r.routingControl);
-                                    }
-                                }
+                                addRoutingControlToMap(r.routingControl, map, currentRouting);
 
                                 r.routingControl.once('routesfound', function(e) {
                                     console.log(`[setupRouteControlPanel] Routes found for selected route ${i}, applying style.`);
@@ -2881,6 +3067,7 @@ async function route(
     // shows the in-progress badge). handleOnRouteFound + showBestRoute below
     // capture this token from the closure to guard against stale route switches.
     const runToken = beginEnvQualityRun();
+    let routingSessionId = null;
 
     let startLat, startLon, endLat, endLon; // Declare here for broader scope if needed by fallback in main catch
 
@@ -2900,6 +3087,11 @@ async function route(
     async function handleOnRouteFound(e, routeControl, createdRoute, initialLeafletWaypoints) {
         try {
             console.log(`[handleOnRouteFound] Called for route: ${createdRoute.routeName}`);
+            if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                console.warn(`[handleOnRouteFound] Ignoring stale route event for ${createdRoute.routeName}`);
+                removeRoutingControlArtifacts(routeControl, map, { clearWaypoints: true });
+                return;
+            }
             createdRoute.originalWaypoints = initialLeafletWaypoints; // Store original L.LatLng waypoints
 
             const routePath = e.routes[0];
@@ -3227,21 +3419,8 @@ async function route(
             return;
         }
 
-        // Clear existing routes and UI elements from the map
-        if (currentRouting.routingControl && map.hasLayer(currentRouting.routingControl)) {
-            try { map.removeControl(currentRouting.routingControl); } catch (e) { console.warn("Error removing main RC"); }
-        }
-        if (currentRouting.routingControls && Array.isArray(currentRouting.routingControls)) {
-            currentRouting.routingControls.forEach(control => {
-                if (control && map.hasLayer(control)) try { map.removeControl(control); } catch (e) { console.warn("Error removing array RC");}
-            });
-            currentRouting.routingControls = [];
-        }
-        clearRouteSelectorContainer();
-        if (window.routeInfoLabels) {
-            window.routeInfoLabels.forEach(l => { if (l && l._map) map.removeLayer(l); });
-            window.routeInfoLabels = [];
-        }
+        // Clear existing routes, route-control DOM and directions UI for this new run.
+        routingSessionId = beginRoutingSession(map, currentRouting);
 
         var waypoints = [L.latLng(startLat, startLon), L.latLng(endLat, endLon)];
         // Don't show loading screen here if it's already shown by routing.js
@@ -3285,6 +3464,7 @@ async function route(
 
                     // Explicitly add to map first
                     directRouteControl.addTo(map);
+                    registerRoutingControl(directRouteControl);
                     currentRouting.routingControls.push(directRouteControl);
 
                     directRouteControl.on('routesfound', async (e) => {
@@ -3331,6 +3511,7 @@ async function route(
 
                         // Explicitly add to map first
                         altRouteControl.addTo(map);
+                        registerRoutingControl(altRouteControl);
                         currentRouting.routingControls.push(altRouteControl);
 
                         altRouteControl.on('routesfound', async (e) => {
@@ -3367,6 +3548,7 @@ async function route(
 	                    });
 
                     directRouteControl.addTo(map);
+                    registerRoutingControl(directRouteControl);
                     currentRouting.routingControls.push(directRouteControl);
 
                     directRouteControl.on('routesfound', async (e) => {
@@ -3419,6 +3601,10 @@ async function route(
             // PP-PREVIEW-REGR-FIX: this renders the panel + preview + directions tab
             // from route geometry alone, so they appear immediately and no longer wait
             // on env/POI/scoring (which were hanging the UI when Overpass was down).
+            if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                console.warn('[route] Skipping stale route render after a newer route run started.');
+                return;
+            }
             showBestRoute();
 
             // PP-PREVIEW-REGR-FIX: refresh scores + resolve the env-quality badge in
@@ -3427,6 +3613,10 @@ async function route(
             // handleOnRouteFound guarantee these promises always settle promptly.
             Promise.allSettled(enrichmentPromises).then(() => {
                 try {
+                    if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                        console.warn('[route] Skipping stale background enrichment refresh.');
+                        return;
+                    }
                     if (allRoutes.length > 0) {
                         deduplicateRoutesForComparison(allRoutes, map, currentRouting);
                         currentRoute = selectBestRoute(allRoutes, currentPatientCondition) || currentRoute;
@@ -3444,6 +3634,10 @@ async function route(
 
             // A local function to show the best route
             function showBestRoute() {
+                if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                    console.warn('[route] Ignoring stale showBestRoute call.');
+                    return;
+                }
                 console.log(`[route] Displaying ${allRoutes.length} routes with best route: ${currentRoute?.routeName || 'Unknown'}`);
 
                 // Apply styling to each route but don't control visibility here
@@ -3487,13 +3681,17 @@ async function route(
             // Hide loading screen on error
             LoadingScreen.hide(document);
             resolveEnvQualityBadge(runToken, 'unavailable', 'Qualità ambientale non disponibile');
-            displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
+            if (isActiveRoutingSession(currentRouting, routingSessionId)) {
+                displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
+            }
         }
 
     } catch (errorInMainRouteFunction) { // Catches errors from the main setup, or if rethrown from async block
         console.error("[route] Error in main function execution (outside async block):", errorInMainRouteFunction);
         resolveEnvQualityBadge(runToken, 'unavailable', 'Qualità ambientale non disponibile');
-        displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
+        if (isActiveRoutingSession(currentRouting, routingSessionId)) {
+            displayFallbackRoute(map, currentRouting, waypointInputs, additionalInfos, startLat, startLon, endLat, endLon);
+        }
     } finally { // TOP-LEVEL FINALLY BLOCK
         LoadingScreen.hide(document); // Always hide loading screen
         if (Environmental.finalizeRouteCalculation) {
@@ -3503,11 +3701,12 @@ async function route(
             console.warn("[route] Environmental.finalizeRouteCalculation is not defined in main finally block!");
         }
 
-        // CRITICAL FIX: Ensure routes are always added to csvData
+        // CRITICAL FIX: Ensure routes are always added to csvData, but never let
+        // an obsolete async run resurrect stale route UI/data after a newer run.
         console.log("[route] Adding routes to csvData in finally block, routes count:", allRoutes.length);
 
 	        // Force direct addition to window.csvData to guarantee it works
-	        if (allRoutes && allRoutes.length > 0) {
+	        if (allRoutes && allRoutes.length > 0 && isActiveRoutingSession(currentRouting, routingSessionId)) {
 	            if (!window.csvData) {
 	                window.csvData = [];
 	            }
@@ -3541,6 +3740,8 @@ async function route(
             if (typeof window.updateDownloadButtonText === 'function') {
                 window.updateDownloadButtonText();
             }
+        } else if (allRoutes && allRoutes.length > 0) {
+            console.warn("[route] Skipping stale route CSV/UI finalization after a newer route run.");
         } else {
             console.warn("[route] No routes available to add to csvData in finally block");
         }
@@ -3565,6 +3766,11 @@ function createMinimalPOIData() {
     };
 }
 
+// PP-ASTAR-FIX: detour cap for the FINAL street-snapped route (mirrors the A*
+// grid cap). Shared constant so the future "distance tolerance" slider can drive
+// both the grid cap and this render-time guard.
+const RENDER_DETOUR_CAP = 1.3;
+
 /**
  * Route with pre-calculated routes from A* algorithm
  * This function handles routes that were already calculated by the A* algorithm
@@ -3581,6 +3787,7 @@ async function routeWithPrecalculatedRoutes(
 ) {
     // PP-LOAD-PERF: open a new env-quality run (anti-stale token + in-progress badge).
     const runToken = beginEnvQualityRun();
+    const routingSessionId = beginRoutingSession(map, currentRouting);
     try {
         console.log("[routeWithPrecalculatedRoutes] Processing pre-calculated routes. Condition:", currentPatientCondition ? currentPatientCondition.name : 'N/A');
 
@@ -3588,18 +3795,25 @@ async function routeWithPrecalculatedRoutes(
             Environmental.startRouteCalculation();
         }
 
-        // Clear existing routes first
-        if (currentRouting.routingControls && Array.isArray(currentRouting.routingControls)) {
-            currentRouting.routingControls.forEach(control => {
-                if (control && map.hasLayer(control)) {
-                    try { map.removeControl(control); } catch (e) { console.warn("Error removing control:", e); }
-                }
-            });
-            currentRouting.routingControls = [];
-        }
-
         const preCalculatedRoutes = additionalInfos.preCalculatedRoutes;
         const allRoutes = [];
+
+        function refreshPrecalculatedRouteDisplay(routeObject, routeIndex, options = {}) {
+            if (!routeObject) return;
+
+            const selectorContainer = getRouteSelectorContainer();
+            const radio = selectorContainer?.querySelector?.(`input[name="route-selection"][data-index="${routeIndex}"]`);
+            const cardInfo = radio?.closest?.('.directions-route-card')?.querySelector?.('.directions-route-card-info');
+            const isSelected = Boolean(radio?.checked) || routeObject.isBest;
+
+            if (cardInfo) {
+                renderRouteSelectorInfo(cardInfo, routeObject, routeIndex, isSelected);
+            }
+            if (isSelected && options.renderSidebar !== false) {
+                applyRouteLineStyle(routeObject, true);
+                renderDirectionsSidebar(routeObject);
+            }
+        }
 
         console.log(`[routeWithPrecalculatedRoutes] Processing ${preCalculatedRoutes.length} pre-calculated routes`);
 
@@ -3615,6 +3829,75 @@ async function routeWithPrecalculatedRoutes(
 
             // Create waypoints from route data
             const waypoints = route.waypoints.map(wp => L.latLng(wp.lat, wp.lon));
+            const capStart = L.latLng(waypointInputs.start.lat, waypointInputs.start.lon);
+            const capGoal = L.latLng(waypointInputs.end.lat, waypointInputs.end.lon);
+            const directWaypoints = [capStart, capGoal];
+            const capDirectM = capStart.distanceTo(capGoal);
+            const capMaxM = RENDER_DETOUR_CAP * capDirectM + 200;
+            let routeObject = null;
+
+            function routeEventViaCount(ev) {
+                const eventWaypoints = Array.isArray(ev?.waypoints)
+                    ? ev.waypoints
+                        .map(wp => wp?.latLng || wp)
+                        .filter(Boolean)
+                    : [];
+
+                return eventWaypoints.length >= 2 ? Math.max(0, eventWaypoints.length - 2) : null;
+            }
+
+            function applyAcceptedMapboxRoute(routePath, acceptedWaypoints, options = {}) {
+                if (!routeObject || !routePath) return;
+
+                routeObject.route = routePath;
+                routeObject.length = routePath.summary ? routePath.summary.totalDistance : routeObject.length;
+                routeObject.duration = routePath.summary ? routePath.summary.totalTime : routeObject.duration;
+                routeObject.instructions = Array.isArray(routePath.instructions) ? routePath.instructions : routeObject.instructions;
+
+                if (Array.isArray(routePath.coordinates) && routePath.coordinates.length > 0) {
+                    routeObject.coordinates = routePath.coordinates;
+                }
+                if (Array.isArray(acceptedWaypoints) && acceptedWaypoints.length > 0) {
+                    routeObject.waypoints = acceptedWaypoints;
+                    routeObject.originalWaypoints = acceptedWaypoints;
+                }
+                if (options.isDirectFallback) {
+                    routeObject.cappedToDirect = true;
+                    routeObject.isDirectRoute = true;
+                    if (Number.isFinite(routeObject.length)) {
+                        routingControl._acceptedDirectCapLength = routeObject.length;
+                    }
+                }
+
+                refreshPrecalculatedRouteDisplay(routeObject, i);
+            }
+
+            function queueDirectCapReroute() {
+                if (routingControl._directCapRerouteQueued) return;
+                routingControl._directCapRerouteQueued = true;
+                const rerouteDirect = () => {
+                    routingControl._directCapRerouteQueued = false;
+                    if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                        removeRoutingControlArtifacts(routingControl, map, { clearWaypoints: true });
+                        return;
+                    }
+                    try {
+                        removeRoutingControlLines(routingControl, map);
+                        routingControl.setWaypoints(directWaypoints);
+                    } catch (rerouteError) {
+                        console.warn(
+                            `[routeWithPrecalculatedRoutes] route ${i + 1} direct cap re-route failed:`,
+                            rerouteError
+                        );
+                    }
+                };
+
+                if (typeof globalThis.setTimeout === 'function') {
+                    globalThis.setTimeout(rerouteDirect, 0);
+                } else {
+                    rerouteDirect();
+                }
+            }
 
 	            // Create routing control
                 const initialRouteStyle = getRouteLineStyles({ isDirectRoute: false }, i === 0);
@@ -3631,6 +3914,84 @@ async function routeWithPrecalculatedRoutes(
 	                },
                 router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
                 createMarker: function() { return null; }
+            });
+
+            // PP-ASTAR-FIX: hard detour-cap guard on the FINAL street-snapped route.
+            // The A* grid cap only bounds the raw grid path; Mapbox snapping through
+            // via-points can still inflate the rendered route. If the returned route
+            // exceeds RENDER_DETOUR_CAP × direct, re-route start→goal directly (once)
+            // so the user never sees an absurd detour/backtracking polyline.
+            routingControl.on('routesfound', function (ev) {
+                if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                    console.warn(`[routeWithPrecalculatedRoutes] route ${i + 1} ignoring stale routesfound from old run.`);
+                    removeRoutingControlArtifacts(routingControl, map, { clearWaypoints: true });
+                    return;
+                }
+
+                const r = ev.routes && ev.routes[0];
+                const total = r && r.summary ? r.summary.totalDistance : null;
+                const eventViaCount = routeEventViaCount(ev);
+                const isDirectFallback = routingControl._cappedToDirect === true;
+                const acceptedWaypoints = isDirectFallback ? directWaypoints : waypoints;
+                const nVia = eventViaCount ?? Math.max(0, acceptedWaypoints.length - 2);
+                console.log(
+                    `[routeWithPrecalculatedRoutes] route ${i + 1} rendered=${total != null ? total.toFixed(0) : '?'}m ` +
+                    `direct=${capDirectM.toFixed(0)}m cap=${capMaxM.toFixed(0)}m viaPoints=${nVia}`
+                );
+
+                if (isDirectFallback && eventViaCount !== null && eventViaCount > 0) {
+                    console.warn(
+                        `[routeWithPrecalculatedRoutes] route ${i + 1} ignoring stale via result after direct cap guard; ` +
+                        `viaPoints=${eventViaCount}`
+                    );
+                    removeRoutingControlLines(routingControl, map);
+                    queueDirectCapReroute();
+                    return;
+                }
+
+                if (
+                    isDirectFallback &&
+                    total != null &&
+                    total > capMaxM &&
+                    Number.isFinite(routingControl._acceptedDirectCapLength) &&
+                    routingControl._acceptedDirectCapLength <= capMaxM
+                ) {
+                    console.warn(
+                        `[routeWithPrecalculatedRoutes] route ${i + 1} ignoring stale over-cap result ` +
+                        `${total.toFixed(0)}m after accepted direct ${routingControl._acceptedDirectCapLength.toFixed(0)}m`
+                    );
+                    removeRoutingControlLines(routingControl, map);
+                    queueDirectCapReroute();
+                    return;
+                }
+
+                if (total != null && total > capMaxM && !isDirectFallback) {
+                    routingControl._cappedToDirect = true;
+                    if (routeObject) {
+                        routeObject.cappedToDirect = true;
+                        routeObject.isDirectRoute = true;
+                        routeObject.waypoints = directWaypoints;
+                        routeObject.originalWaypoints = directWaypoints;
+                        refreshPrecalculatedRouteDisplay(routeObject, i, { renderSidebar: false });
+                    }
+                    removeRoutingControlLines(routingControl, map);
+                    clearDirectionsSidebarRouteUi();
+                    console.warn(
+                        `[routeWithPrecalculatedRoutes] route ${i + 1} ${total.toFixed(0)}m > cap ${capMaxM.toFixed(0)}m ` +
+                        `→ re-routing start→goal directly`
+                    );
+                    queueDirectCapReroute();
+                    return;
+                }
+
+                if (isDirectFallback && total != null && total > capMaxM) {
+                    console.warn(
+                        `[routeWithPrecalculatedRoutes] route ${i + 1} direct fallback still exceeds cap ` +
+                        `(${total.toFixed(0)}m > ${capMaxM.toFixed(0)}m); keeping shortest available direct route`
+                    );
+                }
+
+                applyAcceptedMapboxRoute(r, acceptedWaypoints, { isDirectFallback });
             });
 
             // DO NOT add to map here. setupRouteControlPanel will handle it.
@@ -3678,7 +4039,7 @@ async function routeWithPrecalculatedRoutes(
             }
 
             // Create route object with all data
-            const routeObject = {
+            routeObject = {
                 routeName: route.name || `Route ${i+1}`,
                 name: route.name || `Route ${i+1}`,
                 description: route.description || "",
@@ -3740,6 +4101,12 @@ async function routeWithPrecalculatedRoutes(
                 console.warn('[routeWithPrecalculatedRoutes] Failed to calculate dynamic POI score:', scoreErr);
             }
 
+            if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                console.warn(`[routeWithPrecalculatedRoutes] Skipping stale route ${i + 1} after newer run started.`);
+                removeRoutingControlArtifacts(routingControl, map, { clearWaypoints: true });
+                continue;
+            }
+
             // Store in array
             allRoutes.push(routeObject);
 
@@ -3756,6 +4123,13 @@ async function routeWithPrecalculatedRoutes(
               continue;
           }
 	        }
+
+            if (!isActiveRoutingSession(currentRouting, routingSessionId)) {
+                console.warn('[routeWithPrecalculatedRoutes] Skipping stale panel setup after newer route run.');
+                allRoutes.forEach(route => removeRouteControlFromMap(route, map, currentRouting));
+                resolveEnvQualityBadge(runToken, 'unavailable', 'Qualità ambientale non disponibile');
+                return false;
+            }
 
             deduplicateRoutesForComparison(allRoutes, map, currentRouting);
 	        console.log(`[routeWithPrecalculatedRoutes] Created ${allRoutes.length} routes, control panel setup will manage map addition.`);

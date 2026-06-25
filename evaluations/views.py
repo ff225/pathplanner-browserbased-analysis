@@ -5,6 +5,7 @@ from users.models import UserPreferences
 from .models import Stazione, Misurazione
 from .utils import calculate_route  # Assuming you have a utility function for route calculation
 from .air_quality_service import air_quality_service
+from .pollen_service import get_pollen_data
 from .environmental_data_service import environmental_data_service, fetch_named_pois, POI_CATEGORIES
 from .real_environment_service import build_environment_payload
 from .multifactor_scoring import calculate_multifactor_score
@@ -700,6 +701,24 @@ def get_pois_in_bbox(request):
         return JsonResponse({'error': str(exc)}, status=400)
     except Exception:
         return JsonResponse({'error': 'pois lookup failed'}, status=500)
+
+
+def get_pollen(request):
+    """Real Open-Meteo pollen (6 types, grains/m3) for the selected city.
+
+    GET /api/pollen/?lat=44.6471&lon=10.9252
+    Returns honest null values (status="unavailable") outside Europe / off-season;
+    NEVER synthetic data.
+    """
+    try:
+        lat = _parse_lat_lon(request.GET.get('lat'), request.GET.get('lon'))
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=400)
+
+    try:
+        return JsonResponse(get_pollen_data(lat[0], lat[1]))
+    except Exception:
+        return JsonResponse({'error': 'pollen data lookup failed'}, status=500)
 
 
 # View to handle air quality data requests

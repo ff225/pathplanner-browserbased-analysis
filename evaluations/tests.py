@@ -4,6 +4,7 @@ import requests
 from django.test import TestCase, override_settings
 
 from .real_environment_service import clear_environment_cache
+from .pollen_service import clear_pollen_cache
 
 
 class MockJsonResponse:
@@ -116,6 +117,107 @@ class RealEnvironmentEndpointTests(TestCase):
             '/api/environment/',
             {'lat': '100', 'lon': '12.4964', 'pathologies': 'respiratory'},
         )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'error': 'lat must be between -90 and 90'})
+
+
+class PollenEndpointTests(TestCase):
+    def setUp(self):
+        clear_pollen_cache()
+
+    def tearDown(self):
+        clear_pollen_cache()
+
+    @staticmethod
+    def _open_meteo_pollen_payload():
+        return {
+            'latitude': 44.6471,
+            'longitude': 10.9252,
+            'hourly_units': {
+                'time': 'iso8601',
+                'alder_pollen': 'grains/m³',
+                'birch_pollen': 'grains/m³',
+                'grass_pollen': 'grains/m³',
+                'mugwort_pollen': 'grains/m³',
+                'olive_pollen': 'grains/m³',
+                'ragweed_pollen': 'grains/m³',
+            },
+            'hourly': {
+                'time': ['2026-06-25T08:00'],
+                'alder_pollen': [0.0],
+                'birch_pollen': [None],
+                'grass_pollen': [22.4],
+                'mugwort_pollen': [0.0],
+                'olive_pollen': [5.1],
+                'ragweed_pollen': [None],
+            },
+        }
+
+    @patch('evaluations.pollen_service.requests.get')
+    def test_pollen_endpoint_parses_open_meteo(self, mock_get):
+        mock_get.return_value = MockJsonResponse(self._open_meteo_pollen_payload())
+
+        response = self.client.get('/api/pollen/', {'lat': '44.6471', 'lon': '10.9252'})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'available')
+        self.assertEqual(payload['provider'], 'Open-Meteo Air Quality API')
+        self.assertEqual(payload['unit'], 'grains/m³')
+        self.assertEqual(payload['timestamp'], '2026-06-25T08:00')
+        self.assertEqual(payload['pollen']['grass']['value'], 22.4)
+        self.assertEqual(payload['pollen']['olive']['value'], 5.1)
+        # Null variables stay null — never invented.
+        self.assertIsNone(payload['pollen']['birch']['value'])
+        self.assertIsNone(payload['pollen']['ragweed']['value'])
+        self.assertEqual(payload['total'], 27.5)
+        self.assertEqual(payload['dominant'], {'type': 'grass', 'value': 22.4})
+        self.assertEqual(
+            sorted(payload['available_types']),
+            ['alder', 'grass', 'mugwort', 'olive'],
+        )
+
+        # Explicit connect/read timeout on the outbound HTTP call.
+        self.assertEqual(mock_get.call_args.kwargs['timeout'], (5, 10))
+
+    @patch('evaluations.pollen_service.requests.get')
+    def test_pollen_endpoint_handles_offseason_nulls(self, mock_get):
+        payload = self._open_meteo_pollen_payload()
+        for variable in (
+            'alder_pollen', 'birch_pollen', 'grass_pollen',
+            'mugwort_pollen', 'olive_pollen', 'ragweed_pollen',
+        ):
+            payload['hourly'][variable] = [None]
+        mock_get.return_value = MockJsonResponse(payload)
+
+        response = self.client.get('/api/pollen/', {'lat': '64.0', 'lon': '-20.0'})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body['status'], 'unavailable')
+        self.assertEqual(body['total'], 0.0)
+        self.assertEqual(body['available_types'], [])
+        self.assertIsNone(body['dominant'])
+        self.assertTrue(body['reason'])
+        # No fake values — every type stays null.
+        for entry in body['pollen'].values():
+            self.assertIsNone(entry['value'])
+
+    @patch('evaluations.pollen_service.requests.get')
+    def test_pollen_endpoint_uses_geo_cache(self, mock_get):
+        mock_get.return_value = MockJsonResponse(self._open_meteo_pollen_payload())
+
+        first = self.client.get('/api/pollen/', {'lat': '44.6471', 'lon': '10.9252'})
+        second = self.client.get('/api/pollen/', {'lat': '44.6472', 'lon': '10.9251'})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        # Both coords round to the same geo-cache cell -> only one upstream call.
+        self.assertEqual(mock_get.call_count, 1)
+
+    def test_pollen_endpoint_rejects_invalid_coordinates(self):
+        response = self.client.get('/api/pollen/', {'lat': '100', 'lon': '10.0'})
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'error': 'lat must be between -90 and 90'})

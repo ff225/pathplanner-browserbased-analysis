@@ -73,7 +73,8 @@ def _cache_set(key: str, data: Dict[str, Any]) -> None:
 # circuit-breaker that short-circuits to cached/default values once Overpass is
 # clearly down, exponential backoff+jitter with mirror rotation on retry, and a
 # coarse geospatial cache so neighbouring nodes reuse a single fetch.
-OVERPASS_TIMEOUT = 25  # seconds per mirror (kept from the original)
+OVERPASS_TIMEOUT = 25  # seconds per mirror for the routing env-A* path (kept from the original)
+OVERPASS_POI_TIMEOUT = 8  # seconds per mirror for the interactive map POI overlay
 OVERPASS_BREAKER_THRESHOLD = 4  # consecutive failed calls before the breaker opens
 OVERPASS_BREAKER_COOLDOWN = 60.0  # seconds the breaker stays open before a trial call
 OVERPASS_BACKOFF_BASE = 0.5  # seconds, delay before the first retry
@@ -117,6 +118,10 @@ class _OverpassBreaker:
 
 
 _overpass_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKER_COOLDOWN)
+# Separate breaker for the user-facing map POI overlay: the routing env-A* path
+# fires 3 queries per node and can trip its breaker under load, but that must
+# NOT blank out the interactive map overlay, which fires one query per request.
+_overpass_poi_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKER_COOLDOWN)
 _overpass_mirror_index = 0  # rotates the starting mirror across calls
 
 
@@ -136,6 +141,8 @@ def reset_overpass_state() -> None:
     global _overpass_mirror_index
     _overpass_breaker.failures = 0
     _overpass_breaker.opened_at = None
+    _overpass_poi_breaker.failures = 0
+    _overpass_poi_breaker.opened_at = None
     _overpass_mirror_index = 0
     _CACHE.clear()
 
@@ -245,15 +252,28 @@ def _fetch_slope(lat: float, lon: float) -> Tuple[Optional[float], str]:
         return None, 'none'
 
 
-def _overpass_post(query: str) -> Optional[dict]:
+def _overpass_post(
+    query: str,
+    breaker: Optional['_OverpassBreaker'] = None,
+    timeout: Optional[float] = None,
+) -> Optional[dict]:
     """POST an Overpass query, rotating mirrors with exponential backoff.
 
     Returns the parsed JSON on success, or ``None`` when every mirror fails or
     the circuit-breaker is open (callers then fall back to cached/default data).
+
+    ``breaker`` and ``timeout`` default to the routing env-A* breaker / timeout.
+    The interactive map POI overlay passes its own breaker and a shorter timeout
+    so the routing flood cannot blank it out.
     """
     global _overpass_mirror_index
 
-    if _overpass_breaker.is_open():
+    if breaker is None:
+        breaker = _overpass_breaker
+    if timeout is None:
+        timeout = OVERPASS_TIMEOUT
+
+    if breaker.is_open():
         print('[overpass] circuit open — short-circuiting to cached/default values')
         return None
 
@@ -273,10 +293,10 @@ def _overpass_post(query: str) -> Optional[dict]:
                 base_url,
                 data={'data': query},
                 headers=headers,
-                timeout=OVERPASS_TIMEOUT,
+                timeout=timeout,
             )
             if r.ok:
-                _overpass_breaker.record_success()
+                breaker.record_success()
                 return r.json()
             print(f'[overpass] {base_url} HTTP {r.status_code}')
         except Exception as exc:
@@ -286,7 +306,7 @@ def _overpass_post(query: str) -> Optional[dict]:
         if attempt < n - 1:
             time.sleep(_overpass_backoff_delay(attempt))
 
-    _overpass_breaker.record_failure()
+    breaker.record_failure()
     return None
 
 
@@ -433,9 +453,9 @@ def fetch_named_pois(
 
     bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
     body = ''.join(f'{f}({bbox});' for f in config['filters'])
-    query = f'[out:json][timeout:25];({body});out tags center {int(limit)};'
+    query = f'[out:json][timeout:{OVERPASS_POI_TIMEOUT}];({body});out tags center {int(limit)};'
 
-    data = _overpass_post(query)
+    data = _overpass_post(query, breaker=_overpass_poi_breaker, timeout=OVERPASS_POI_TIMEOUT)
     if data is None:
         raise RuntimeError('Overpass unavailable for POI lookup')
 

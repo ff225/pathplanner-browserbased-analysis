@@ -105,6 +105,40 @@ def test_backoff_is_applied_between_mirrors():
     assert mock_uniform.call_count == n_mirrors - 1
 
 
+def test_poi_overlay_survives_routing_breaker_open():
+    """The map POI overlay must keep returning data even when the routing
+    env-A* breaker is fully OPEN (regression for the shared-breaker outage)."""
+    # Trip the routing breaker as if env-A* had flooded the mirrors.
+    eds._overpass_breaker.failures = eds.OVERPASS_BREAKER_THRESHOLD
+    eds._overpass_breaker.opened_at = eds.time.time()
+    assert eds._overpass_breaker.is_open() is True
+
+    poi_payload = {
+        'elements': [
+            {'type': 'node', 'lat': 44.50, 'lon': 11.30, 'tags': {'name': 'Parco Nord', 'leisure': 'park'}},
+        ]
+    }
+    with patch.object(eds.requests, 'post', return_value=_MockResponse(poi_payload)) as mock_post:
+        result = eds.fetch_named_pois('parks', 44.49, 11.29, 44.51, 11.31)
+
+    assert mock_post.called  # POI path went out to Overpass despite routing breaker
+    assert result['count'] == 1
+    assert result['pois'][0]['name'] == 'Parco Nord'
+    # The dedicated POI breaker used the shorter interactive timeout.
+    assert mock_post.call_args.kwargs['timeout'] == eds.OVERPASS_POI_TIMEOUT
+
+
+def test_poi_overlay_uses_dedicated_breaker():
+    """A POI-path failure trips only the POI breaker, never the routing one."""
+    with patch.object(eds.time, 'sleep'), \
+            patch.object(eds.requests, 'post', side_effect=requests.exceptions.Timeout('boom')):
+        with pytest.raises(RuntimeError):
+            eds.fetch_named_pois('hospitals', 44.49, 11.29, 44.51, 11.31)
+
+    assert eds._overpass_poi_breaker.failures == 1
+    assert eds._overpass_breaker.failures == 0  # routing path untouched
+
+
 def test_breaker_half_opens_after_cooldown():
     breaker = eds._overpass_breaker
     breaker.failures = eds.OVERPASS_BREAKER_THRESHOLD

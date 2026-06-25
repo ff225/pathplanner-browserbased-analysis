@@ -1,3 +1,4 @@
+import concurrent.futures
 import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -9,11 +10,14 @@ from django.conf import settings
 
 OPEN_METEO_AIR_QUALITY_URL = 'https://air-quality-api.open-meteo.com/v1/air-quality'
 OPENAQ_LOCATIONS_URL = 'https://api.openaq.org/v3/locations'
-REQUEST_TIMEOUT_SECONDS = 12
+# Explicit (connect, read) timeout so a slow/dead upstream can't hang the request.
+REQUEST_TIMEOUT_SECONDS = (5, 10)
 CACHE_TTL_SECONDS = 15 * 60
 OPENAQ_RADIUS_M = 25_000
 OPENAQ_LOCATION_LIMIT = 5
 MAX_WAYPOINTS = 12
+# Bound on concurrent per-waypoint env lookups (each does blocking HTTP I/O).
+ENV_MAX_WORKERS = 8
 
 OPEN_METEO_VARIABLES = (
     'european_aqi',
@@ -157,7 +161,7 @@ def build_environment_payload(
 
     pathologies = normalize_pathologies(raw_pathologies)
     pollutants = relevant_pollutants(pathologies)
-    points = [_environment_for_point(lat, lon, pollutants) for lat, lon in waypoints]
+    points = _environment_for_points(waypoints, pollutants)
     available_points = [point for point in points if point['status'] == 'available']
 
     payload = {
@@ -173,6 +177,30 @@ def build_environment_payload(
         payload['pollutants'] = points[0]['pollutants']
         payload['overall_aqi'] = points[0]['overall_aqi']
     return payload
+
+
+def _environment_for_points(
+    waypoints: Sequence[Tuple[float, float]],
+    pollutants: Sequence[str],
+) -> List[Dict[str, Any]]:
+    """Fetch env data for every waypoint, parallelizing the blocking HTTP I/O.
+
+    A single point stays inline (no thread pool) so the common one-point case
+    keeps deterministic call ordering. For multiple points each lookup runs on
+    its own thread; results are collected by submission index, so the returned
+    list always matches the input waypoint order regardless of completion order.
+    """
+    if len(waypoints) == 1:
+        lat, lon = waypoints[0]
+        return [_environment_for_point(lat, lon, pollutants)]
+
+    max_workers = min(ENV_MAX_WORKERS, len(waypoints))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_environment_for_point, lat, lon, pollutants)
+            for lat, lon in waypoints
+        ]
+        return [future.result() for future in futures]
 
 
 def _environment_for_point(lat: float, lon: float, pollutants: Sequence[str]) -> Dict[str, Any]:

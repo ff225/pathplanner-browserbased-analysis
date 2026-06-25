@@ -1,9 +1,14 @@
+import time
 from unittest.mock import patch
 
 import requests
 from django.test import TestCase, override_settings
 
-from .real_environment_service import clear_environment_cache
+from .real_environment_service import (
+    OPEN_METEO_AIR_QUALITY_URL,
+    build_environment_payload,
+    clear_environment_cache,
+)
 from .pollen_service import clear_pollen_cache
 
 
@@ -120,6 +125,66 @@ class RealEnvironmentEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'error': 'lat must be between -90 and 90'})
+
+
+@override_settings(OPENAQ_API_KEY='')
+class ParallelEnvironmentBuildTests(TestCase):
+    """build_environment_payload fans waypoints out across threads; results must
+    still map back to the input order and carry the real per-point values."""
+
+    def setUp(self):
+        clear_environment_cache()
+
+    def tearDown(self):
+        clear_environment_cache()
+
+    @patch('evaluations.real_environment_service.requests.get')
+    def test_parallel_build_preserves_waypoint_order(self, mock_get):
+        # Distinct waypoints; pm2_5 is keyed to the latitude so each returned
+        # point is uniquely identifiable. Earlier waypoints sleep LONGER, so if
+        # results were collected by completion order they would come back
+        # reversed — the index-based collection must keep input order.
+        waypoints = [(40.0, 9.0), (41.0, 9.1), (42.0, 9.2), (43.0, 9.3)]
+
+        def fake_get(url, params=None, **kwargs):
+            # No OpenAQ key configured, so only Open-Meteo is ever called.
+            self.assertEqual(url, OPEN_METEO_AIR_QUALITY_URL)
+            lat = params['latitude']
+            lon = params['longitude']
+            time.sleep((44.0 - lat) * 0.02)
+            return MockJsonResponse({
+                'latitude': lat,
+                'longitude': lon,
+                'utc_offset_seconds': 0,
+                'current_units': {
+                    'time': 'iso8601',
+                    'european_aqi': 'EAQI',
+                    'pm2_5': 'ug/m3',
+                },
+                'current': {
+                    'time': '2026-06-25T08:00',
+                    'european_aqi': lat,
+                    'pm2_5': lat,
+                },
+            })
+
+        mock_get.side_effect = fake_get
+
+        payload = build_environment_payload(waypoints, 'default')
+
+        self.assertEqual(payload['status'], 'available')
+        returned = payload['points']
+        self.assertEqual(len(returned), len(waypoints))
+        # Order preserved AND each point carries its own real value.
+        for (lat, lon), point in zip(waypoints, returned):
+            self.assertEqual(point['lat'], lat)
+            self.assertEqual(point['lon'], lon)
+            self.assertEqual(point['status'], 'available')
+            pm25 = point['pollutants']['pm2_5']
+            self.assertEqual(pm25['value'], lat)
+            self.assertEqual(pm25['source'], 'Open-Meteo Air Quality API')
+        # One Open-Meteo call per waypoint.
+        self.assertEqual(mock_get.call_count, len(waypoints))
 
 
 class PollenEndpointTests(TestCase):

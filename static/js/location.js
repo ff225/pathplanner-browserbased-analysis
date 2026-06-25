@@ -37,6 +37,25 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     }
 
+    // Fire-and-forget GET that warms the backend env cache for the user's
+    // position. Best-effort only: never blocks the UI and swallows all errors.
+    function prefetchRoutingEnvironment(point) {
+        if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) {
+            return;
+        }
+        if (typeof fetch !== 'function') {
+            return;
+        }
+        try {
+            var url = '/api/environment?lat=' + encodeURIComponent(point.lat) +
+                '&lon=' + encodeURIComponent(point.lon) +
+                '&pathologies=default';
+            fetch(url, { method: 'GET' }).catch(function() { /* best-effort */ });
+        } catch (err) {
+            // best-effort: a prefetch failure must never affect geolocation UX
+        }
+    }
+
     function loadEnvironmentForCurrentLocation(lat, lng) {
         var point = {
             lat: Number(lat),
@@ -49,6 +68,10 @@ document.addEventListener("DOMContentLoaded", function() {
         }
 
         window.pathplannerLastGeolocationPoint = point;
+
+        // Warm the backend routing-env cache around the user the moment we know
+        // their location, so the first "Find route" doesn't pay the cold fetch.
+        prefetchRoutingEnvironment(point);
 
         if (window.pathplannerEnvironmentInspector && typeof window.pathplannerEnvironmentInspector.loadForCoordinates === 'function') {
             window.pathplannerEnvironmentInspector.loadForCoordinates(point, {

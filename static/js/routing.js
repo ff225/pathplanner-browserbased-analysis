@@ -373,7 +373,7 @@ document.addEventListener("DOMContentLoaded", function() {
                     window.currentPatientCondition,
                     transportMode,
                     isPatientMode ? 3 : 2,
-                    { preferAStar: useAStar, legacy }
+                    { preferAStar: useAStar, legacy, percentageSlider }
                 );
                 
                 // Convert to format expected by routes.js

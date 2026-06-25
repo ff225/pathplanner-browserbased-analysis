@@ -1614,6 +1614,16 @@ function calculateSampleOverlapRatio(firstCoordinates, secondCoordinates) {
     return matchingSamples / sampleCount;
 }
 
+// #4: two routes are DISTINCT environmental-A* alternatives when both carry an
+// alternative signature and the signatures differ. They came from genuinely
+// different A* grid paths, so they must stay selectable even after Mapbox snaps
+// them onto ~the same roads — only an EXACT polyline match should collapse them.
+function areDistinctAstarAlternatives(routeA, routeB) {
+    const a = routeA?.astarAlternativeSignature;
+    const b = routeB?.astarAlternativeSignature;
+    return Boolean(a && b && a !== b);
+}
+
 function routesHaveSimilarGeometry(existingRoute, candidateRoute) {
     const existingCoordinates = getNormalizedRouteLatLonCoordinates(existingRoute);
     const candidateCoordinates = getNormalizedRouteLatLonCoordinates(candidateRoute);
@@ -1625,7 +1635,15 @@ function routesHaveSimilarGeometry(existingRoute, candidateRoute) {
     const existingRoundedKey = buildRoundedPolylineKey(existingCoordinates);
     const candidateRoundedKey = buildRoundedPolylineKey(candidateCoordinates);
     if (existingRoundedKey && existingRoundedKey === candidateRoundedKey) {
+        // Truly-identical geometry always collapses, even for A* alternatives.
         return true;
+    }
+
+    // #4: genuinely-distinct env-A* alternatives must NOT be merged by the fuzzy
+    // length/overlap heuristic below (Mapbox snapping two distinct grid paths onto
+    // ~the same streets used to wrongly collapse them). Exact dups already handled.
+    if (areDistinctAstarAlternatives(existingRoute, candidateRoute)) {
+        return false;
     }
 
     const existingLength = routeLengthForSimilarity(existingRoute, existingCoordinates);
@@ -4002,9 +4020,19 @@ function createMinimalPOIData() {
 }
 
 // PP-ASTAR-FIX: detour cap for the FINAL street-snapped route (mirrors the A*
-// grid cap). Shared constant so the future "distance tolerance" slider can drive
-// both the grid cap and this render-time guard.
+// grid cap). Baseline 1.3× at slider x1.0; the distance-tolerance slider now
+// drives both the A* grid bbox/reward and this render-time guard so a longer
+// green detour is not clamped back to the direct route.
 const RENDER_DETOUR_CAP = 1.3;
+const RENDER_DETOUR_CAP_GAIN = 0.08; // +0.08× per slider step above 1 (→ ~2.0× at 10)
+
+// Resolve the render detour cap for the given slider value (1..10). Slider <=1
+// or non-finite returns the legacy 1.3× baseline.
+function resolveRenderDetourCap(percentageSlider) {
+    const s = Number(percentageSlider);
+    const t = Number.isFinite(s) && s > 1 ? Math.min(s, 10) : 1;
+    return RENDER_DETOUR_CAP + (t - 1) * RENDER_DETOUR_CAP_GAIN;
+}
 
 /**
  * Route with pre-calculated routes from A* algorithm
@@ -4114,7 +4142,8 @@ async function routeWithPrecalculatedRoutes(
             const capGoal = L.latLng(waypointInputs.end.lat, waypointInputs.end.lon);
             const directWaypoints = [capStart, capGoal];
             const capDirectM = capStart.distanceTo(capGoal);
-            const capMaxM = RENDER_DETOUR_CAP * capDirectM + 200;
+            const renderDetourCap = resolveRenderDetourCap(additionalInfos.percentageSlider);
+            const capMaxM = renderDetourCap * capDirectM + 200;
             let routeObject = null;
 
             function routeEventViaCount(ev) {
@@ -4347,7 +4376,10 @@ async function routeWithPrecalculatedRoutes(
                 // so the env-quality badge can honestly distinguish real vs estimate.
                 realDataPercentage: Number.isFinite(route.realDataPercentage) ? route.realDataPercentage : 0,
                 isBest: i === 0, // Explicitly mark first route as best
-                removedFromMap: false // All routes will be on the map, styled by setupRouteControlPanel
+                removedFromMap: false, // All routes will be on the map, styled by setupRouteControlPanel
+                // #4: distinct env-A* alternative marker (see deduplication guard).
+                routingEngine: route.routingEngine,
+                astarAlternativeSignature: route.astarAlternativeSignature
             };
 
             // Generate POI counts if missing

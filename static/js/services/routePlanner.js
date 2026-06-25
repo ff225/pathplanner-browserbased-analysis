@@ -144,6 +144,13 @@ async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, 
             routingEngine: 'environmental_astar',
             astarInternalCost: ar.environmentalScore,
             astarPathNodeCount: path.length,
+            // #4: distinct-alternative marker. Each env-A* alternative is a
+            // genuinely different grid path (the generator guarantees distinct
+            // grid signatures); carry that signature so the route-comparison
+            // dedup can keep env-distinct alternatives selectable while still
+            // collapsing truly-identical geometry. Fall back to the index when no
+            // signature is available so alternatives stay distinguishable.
+            astarAlternativeSignature: ar.routeGridSignature || `astar-alt-${i}`,
         });
     }
     return routes;
@@ -246,6 +253,9 @@ export async function generateOptimizedRoutes(
 ) {
     const preferAStar = options.preferAStar !== false;
     const preferences = options.preferences || null;
+    // Distance-tolerance slider (#percentageSlider, 1..10; 1 = baseline). Threaded
+    // into the A* so higher tolerance = longer, greener detours.
+    const distanceTolerance = options.percentageSlider != null ? options.percentageSlider : 1;
     const usePatientAStar =
         preferAStar &&
         patientCondition.isPatientMode &&
@@ -308,6 +318,7 @@ export async function generateOptimizedRoutes(
                         patientCondition,
                         astarRouteCount,
                         preferences,
+                        distanceTolerance,
                     ),
                     astarMs,
                     'Environmental A*'
@@ -1392,6 +1403,8 @@ export function convertToRoutesFormat(optimizedRoutes) {
             routingEngine: route.routingEngine || 'unknown',
             astarPathNodeCount: route.astarPathNodeCount,
             astarInternalCost: route.astarInternalCost,
+            // #4: carry the distinct-alternative marker into the routes.js layer.
+            astarAlternativeSignature: route.astarAlternativeSignature,
         };
     });
 }

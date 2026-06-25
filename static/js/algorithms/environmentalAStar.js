@@ -53,6 +53,48 @@ const realEnvSeed = {
 // real env from the seed (vs synthetic fallback). Reset at each findOptimalRoute.
 let envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
 
+// ---------------------------------------------------------------------------
+// Distance-tolerance slider (UI #percentageSlider, range 1..10, default 1).
+// Wires the slider into the A* search so HIGHER tolerance = the algorithm is
+// willing to take LONGER detours through GREENER areas:
+//   - widens the search bbox so green detours off the straight line are
+//     actually reachable as grid nodes (TOLERANCE_BBOX_GAIN);
+//   - amplifies the green/nature reward in the cost function so the longer
+//     green path out-competes the short grey one (TOLERANCE_GREEN_GAIN).
+// Slider = 1 (x1.0) keeps the legacy 0.01° bbox and unscaled reward, so the
+// baseline is bit-identical to before this wiring.
+// ---------------------------------------------------------------------------
+const TOLERANCE_BASE_PADDING_DEG = 0.01; // legacy bbox half-padding at slider=1
+const TOLERANCE_BBOX_GAIN = 0.12;        // +12% bbox padding per slider step >1
+const TOLERANCE_GREEN_GAIN = 0.30;       // +30% green reward per slider step >1
+let distanceToleranceFactor = 1;         // 1.0 = baseline (slider x1.0)
+
+/**
+ * Set the distance-tolerance factor from the UI slider value (1..10). Values
+ * <=1 or non-finite reset to the baseline (1.0) so behaviour is unchanged.
+ * @param {number|string} sliderValue
+ * @returns {number} the clamped tolerance factor in effect
+ */
+export function setDistanceTolerance(sliderValue) {
+    const s = Number(sliderValue);
+    distanceToleranceFactor = Number.isFinite(s) && s > 1 ? Math.min(s, 10) : 1;
+    return distanceToleranceFactor;
+}
+
+export function getDistanceTolerance() {
+    return distanceToleranceFactor;
+}
+
+// Search-bbox half-padding in degrees, scaled by the current tolerance.
+function tolerancePaddingDeg() {
+    return TOLERANCE_BASE_PADDING_DEG * (1 + (distanceToleranceFactor - 1) * TOLERANCE_BBOX_GAIN);
+}
+
+// Multiplier (>=1) applied to the green/nature reward, scaled by tolerance.
+function toleranceGreenScale() {
+    return 1 + (distanceToleranceFactor - 1) * TOLERANCE_GREEN_GAIN;
+}
+
 /**
  * Drop all seeded real points. Call before each route so a route never reuses
  * the previous route's real field.
@@ -177,11 +219,12 @@ function getFastEnvironmentalData(lat, lon, patientCondition) {
 }
 
 function getRouteBbox(start, goal) {
+    const pad = tolerancePaddingDeg();
     return {
-        minLat: Math.min(start.lat, goal.lat) - 0.01,
-        maxLat: Math.max(start.lat, goal.lat) + 0.01,
-        minLon: Math.min(start.lon, goal.lon) - 0.01,
-        maxLon: Math.max(start.lon, goal.lon) + 0.01
+        minLat: Math.min(start.lat, goal.lat) - pad,
+        maxLat: Math.max(start.lat, goal.lat) + pad,
+        minLon: Math.min(start.lon, goal.lon) - pad,
+        maxLon: Math.max(start.lon, goal.lon) + pad
     };
 }
 
@@ -452,11 +495,13 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
 function createSearchGrid(start, goal, resolution) {
     const grid = [];
 
-    // Calculate bounding box with some padding
-    const minLat = Math.min(start.lat, goal.lat) - 0.01;
-    const maxLat = Math.max(start.lat, goal.lat) + 0.01;
-    const minLon = Math.min(start.lon, goal.lon) - 0.01;
-    const maxLon = Math.max(start.lon, goal.lon) + 0.01;
+    // Calculate bounding box with tolerance-scaled padding (slider widens it so
+    // longer green detours become reachable grid nodes; baseline 0.01° at x1.0).
+    const pad = tolerancePaddingDeg();
+    const minLat = Math.min(start.lat, goal.lat) - pad;
+    const maxLat = Math.max(start.lat, goal.lat) + pad;
+    const minLon = Math.min(start.lon, goal.lon) - pad;
+    const maxLon = Math.max(start.lon, goal.lon) + pad;
 
     // Calculate grid size
     const latMetersPerDegree = 111320; // at equator
@@ -635,12 +680,12 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
                 if (envData.trafficDensity) {
                     cost += envData.trafficDensity * airQualityMultiplier * 10;
                 }
-                // Lower cost for green areas
+                // Lower cost for green areas (scaled by distance tolerance)
                 if (envData.greenVisibility) {
-                    cost -= envData.greenVisibility * 5;
+                    cost -= envData.greenVisibility * 5 * toleranceGreenScale();
                 }
                 break;
-                
+
             case "cardiac":
                 // Higher penalties for steep slopes
                 if (envData.slope) {
@@ -672,9 +717,9 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
                 if (envData.sensoryLoad) {
                     cost += envData.sensoryLoad * 2;
                 }
-                // Lower cost for green areas
+                // Lower cost for green areas (scaled by distance tolerance)
                 if (envData.greenVisibility) {
-                    cost -= envData.greenVisibility * 8;
+                    cost -= envData.greenVisibility * 8 * toleranceGreenScale();
                 }
                 break;
         }
@@ -689,7 +734,7 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
         const combinedHospital = (patientCondition.patientHospital || 0) + (preferences?.hospital || 0);
 
         if (combinedNature !== 0 && envData.greenVisibility != null) {
-            cost -= envData.greenVisibility * combinedNature * 0.8;
+            cost -= envData.greenVisibility * combinedNature * 0.8 * toleranceGreenScale();
         }
         if (combinedHospital !== 0 && envData.emergencyAccessibility != null) {
             cost -= envData.emergencyAccessibility * combinedHospital * 0.8;
@@ -701,7 +746,7 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
             cost -= (envData.noise / 10) * combinedNightlife * 0.8;
         }
         if (combinedTourism !== 0 && envData.greenVisibility != null) {
-            cost -= envData.greenVisibility * combinedTourism * 0.8;
+            cost -= envData.greenVisibility * combinedTourism * 0.8 * toleranceGreenScale();
         }
     }
 
@@ -1027,7 +1072,11 @@ function addRoutePenalties(penalties, routeResult, nodePenalty = 100, nearbyPena
  * @param {Number} numRoutes - Number of alternative routes to generate
  * @returns {Array} Array of routes
  */
-export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3, preferences = null) {
+export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3, preferences = null, distanceTolerance = 1) {
+    // Apply the UI distance-tolerance slider for this whole route calculation:
+    // widens the search bbox and amplifies the green reward (slider=1 = baseline).
+    setDistanceTolerance(distanceTolerance);
+
     const benchmarkMode = window.PATHPLANNER_BENCHMARK === true;
     const effectiveNumRoutes = benchmarkMode
         ? Math.min(numRoutes, window.BENCHMARK_ASTAR_NUM_ROUTES ?? 1)

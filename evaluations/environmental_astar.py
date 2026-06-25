@@ -116,6 +116,36 @@ _GOAL_RADIUS_M = 50.0
 PREFERENCE_POI_DECAY_M = 200.0
 PREFERENCE_POI_SCALE = 5.0
 
+# Distance-tolerance slider (UI #percentageSlider, 1..10; 1 = baseline). Mirrors
+# environmentalAStar.js: higher tolerance widens the search bbox so green detours
+# are reachable, and amplifies the green/nature reward so longer green paths win.
+# Slider = 1 keeps the legacy 0.01 deg bbox and unscaled reward (bit-identical).
+_TOLERANCE_BASE_PADDING_DEG = 0.01
+_TOLERANCE_BBOX_GAIN = 0.12   # +12% bbox padding per slider step above 1
+_TOLERANCE_GREEN_GAIN = 0.30  # +30% green reward per slider step above 1
+
+
+def _clamp_tolerance(distance_tolerance: float) -> float:
+    try:
+        t = float(distance_tolerance)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(t) or t <= 1.0:
+        return 1.0
+    return min(t, 10.0)
+
+
+def tolerance_padding_deg(distance_tolerance: float = 1.0) -> float:
+    """Search-bbox half-padding (degrees), scaled by the distance-tolerance slider."""
+    t = _clamp_tolerance(distance_tolerance)
+    return _TOLERANCE_BASE_PADDING_DEG * (1.0 + (t - 1.0) * _TOLERANCE_BBOX_GAIN)
+
+
+def tolerance_green_scale(distance_tolerance: float = 1.0) -> float:
+    """Multiplier (>=1) on the green/nature reward, scaled by the slider."""
+    t = _clamp_tolerance(distance_tolerance)
+    return 1.0 + (t - 1.0) * _TOLERANCE_GREEN_GAIN
+
 
 def _node_id(node: Dict[str, float]) -> str:
     return f"{node['lat']:.6f},{node['lon']:.6f}"
@@ -162,12 +192,18 @@ def create_search_grid(
     start: Dict[str, float],
     goal: Dict[str, float],
     resolution_m: float = 100.0,
+    distance_tolerance: float = 1.0,
 ) -> List[Dict[str, float]]:
-    """Same bounding-box grid as environmentalAStar.js createSearchGrid."""
-    min_lat = min(start['lat'], goal['lat']) - 0.01
-    max_lat = max(start['lat'], goal['lat']) + 0.01
-    min_lon = min(start['lon'], goal['lon']) - 0.01
-    max_lon = max(start['lon'], goal['lon']) + 0.01
+    """Same bounding-box grid as environmentalAStar.js createSearchGrid.
+
+    The distance-tolerance slider widens the padding so higher tolerance exposes
+    green detours off the straight line as reachable grid nodes (baseline 0.01).
+    """
+    pad = tolerance_padding_deg(distance_tolerance)
+    min_lat = min(start['lat'], goal['lat']) - pad
+    max_lat = max(start['lat'], goal['lat']) + pad
+    min_lon = min(start['lon'], goal['lon']) - pad
+    max_lon = max(start['lon'], goal['lon']) + pad
 
     mid_lat = (start['lat'] + goal['lat']) / 2.0
     lat_mpd = 111320.0
@@ -186,7 +222,12 @@ def create_search_grid(
     return grid
 
 
-def _adaptive_resolution(start: Dict[str, float], goal: Dict[str, float], base: float = 100.0) -> float:
+def _adaptive_resolution(
+    start: Dict[str, float],
+    goal: Dict[str, float],
+    base: float = 100.0,
+    distance_tolerance: float = 1.0,
+) -> float:
     dist = haversine_m(start, goal)
     res = base
     if dist > 2500:
@@ -196,7 +237,7 @@ def _adaptive_resolution(start: Dict[str, float], goal: Dict[str, float], base: 
     if dist > 8000:
         res = 200.0
     while True:
-        n = len(create_search_grid(start, goal, res))
+        n = len(create_search_grid(start, goal, res, distance_tolerance))
         if n <= _MAX_GRID_NODES or res >= 300:
             return res
         res += 25.0
@@ -353,8 +394,13 @@ def calculate_edge_cost(
     preferences: Optional[Dict[str, float]] = None,
     poi_lists: Optional[Dict[str, List[Tuple[float, float]]]] = None,
     poi_distances: Optional[Dict[str, Dict[str, Optional[float]]]] = None,
+    green_reward_scale: float = 1.0,
 ) -> float:
-    """Port of environmentalAStar.js calculateCost (g-score increment)."""
+    """Port of environmentalAStar.js calculateCost (g-score increment).
+
+    ``green_reward_scale`` (>=1, from the distance-tolerance slider) amplifies the
+    green/nature reward so higher tolerance prefers greener (and thus longer) paths.
+    """
     cost = current_g + haversine_m(current, neighbor)
     env = _get_env(neighbor['lat'], neighbor['lon'])
     name = patient.get('name', 'default')
@@ -385,7 +431,7 @@ def calculate_edge_cost(
 
     if name == 'respiratory':
         cost += env['trafficDensity'] * aq_mult * 10.0
-        cost -= env['greenVisibility'] * 5.0
+        cost -= env['greenVisibility'] * 5.0 * green_reward_scale
     elif name == 'cardiac':
         cost += (abs(slope) ** 2) * slope_mult / 2.0
         cost += env['emergencyAccessibility'] * 2.0
@@ -395,13 +441,13 @@ def calculate_edge_cost(
     elif name == 'mental':
         cost += (noise ** 1.5) * noise_mult
         cost += env['sensoryLoad'] * 2.0
-        cost -= env['greenVisibility'] * 8.0
+        cost -= env['greenVisibility'] * 8.0 * green_reward_scale
 
     # Preference-weight adjustments (combined pathology + user preference)
     prefs = preferences or {}
     combined_nature = patient.get('patientNature', 0) + prefs.get('nature', 0)
     if combined_nature and 'greenVisibility' in env:
-        cost -= env['greenVisibility'] * combined_nature * 0.8
+        cost -= env['greenVisibility'] * combined_nature * 0.8 * green_reward_scale
 
     combined_hospital = patient.get('patientHospital', 0) + prefs.get('hospital', 0)
     if combined_hospital and 'emergencyAccessibility' in env:
@@ -417,7 +463,7 @@ def calculate_edge_cost(
 
     combined_tourism = patient.get('patientTourism', 0) + prefs.get('tourism', 0)
     if combined_tourism and 'greenVisibility' in env:
-        cost -= env['greenVisibility'] * combined_tourism * 0.8
+        cost -= env['greenVisibility'] * combined_tourism * 0.8 * green_reward_scale
 
     # Real POI-based preference adjustments (fallback to proxies above when POI data is missing)
     if poi_lists:
@@ -484,18 +530,24 @@ def find_optimal_route(
     condition: str = 'respiratory',
     grid_resolution_m: Optional[float] = None,
     preferences: Optional[Dict[str, float]] = None,
+    distance_tolerance: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Environmental A* search. Returns grid path, internal astar_cost (lower=better),
     and path nodes for downstream ORS / multifactor scoring.
+
+    ``distance_tolerance`` is the UI #percentageSlider value (1..10; 1 = baseline):
+    higher tolerance widens the search bbox and amplifies the green reward so the
+    route is willing to take longer detours through greener areas.
     """
     clear_env_cache()
     start = {'lat': start_lat, 'lon': start_lon}
     goal = {'lat': end_lat, 'lon': end_lon}
     patient = PATIENT_CONDITIONS.get(condition, PATIENT_CONDITIONS['respiratory'])
+    green_scale = tolerance_green_scale(distance_tolerance)
 
-    resolution = grid_resolution_m or _adaptive_resolution(start, goal)
-    grid = create_search_grid(start, goal, resolution)
+    resolution = grid_resolution_m or _adaptive_resolution(start, goal, distance_tolerance=distance_tolerance)
+    grid = create_search_grid(start, goal, resolution, distance_tolerance)
     poi_lists = get_poi_lists_for_grid(grid)
     poi_distances = precompute_poi_distances(grid, poi_lists) if poi_lists else None
 
@@ -543,7 +595,7 @@ def find_optimal_route(
             if nid in closed:
                 continue
 
-            tentative = calculate_edge_cost(current, neighbor, g_score[cid], patient, preferences, poi_lists, poi_distances)
+            tentative = calculate_edge_cost(current, neighbor, g_score[cid], patient, preferences, poi_lists, poi_distances, green_scale)
 
             if nid not in g_score or tentative < g_score[nid]:
                 came_from[nid] = current

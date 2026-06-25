@@ -14,6 +14,7 @@ Optional env vars:
 
 import math
 import os
+import random
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -64,6 +65,79 @@ def _cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 def _cache_set(key: str, data: Dict[str, Any]) -> None:
     _CACHE[key] = (time.time(), data)
+
+
+# --- Overpass resilience: circuit-breaker + backoff + geospatial cache ---
+# env-A* fires 3 Overpass queries per route node (noise x2 + green-space x1).
+# Without protection this rate-limits the public mirrors. We add: a shared
+# circuit-breaker that short-circuits to cached/default values once Overpass is
+# clearly down, exponential backoff+jitter with mirror rotation on retry, and a
+# coarse geospatial cache so neighbouring nodes reuse a single fetch.
+OVERPASS_TIMEOUT = 25  # seconds per mirror (kept from the original)
+OVERPASS_BREAKER_THRESHOLD = 4  # consecutive failed calls before the breaker opens
+OVERPASS_BREAKER_COOLDOWN = 60.0  # seconds the breaker stays open before a trial call
+OVERPASS_BACKOFF_BASE = 0.5  # seconds, delay before the first retry
+OVERPASS_BACKOFF_MAX = 8.0  # cap on a single backoff sleep
+OVERPASS_GEO_PRECISION = 3  # decimals for the geo-cache grid (~110 m cell)
+
+
+class _OverpassBreaker:
+    """Circuit-breaker shared across the 3 Overpass mirrors.
+
+    Closed (normal) until ``threshold`` consecutive fully-failed calls, then it
+    opens for ``cooldown`` seconds — during which calls short-circuit instead of
+    hammering the mirrors. After the cooldown it half-opens (one trial call); a
+    success closes it again, another failure re-opens it.
+    """
+
+    def __init__(self, threshold: int, cooldown: float) -> None:
+        self.threshold = threshold
+        self.cooldown = cooldown
+        self.failures = 0
+        self.opened_at: Optional[float] = None
+
+    def is_open(self) -> bool:
+        if self.opened_at is None:
+            return False
+        if time.time() - self.opened_at >= self.cooldown:
+            # cooldown elapsed -> half-open: let the next call through as a trial
+            self.opened_at = None
+            self.failures = 0
+            return False
+        return True
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.opened_at = None
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        if self.failures >= self.threshold:
+            self.opened_at = time.time()
+
+
+_overpass_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKER_COOLDOWN)
+_overpass_mirror_index = 0  # rotates the starting mirror across calls
+
+
+def _overpass_backoff_delay(attempt: int) -> float:
+    """Exponential backoff with full jitter for a 0-based retry ``attempt``."""
+    capped = min(OVERPASS_BACKOFF_MAX, OVERPASS_BACKOFF_BASE * (2 ** attempt))
+    return random.uniform(0.0, capped)
+
+
+def _geo_cache_key(prefix: str, lat: float, lon: float) -> str:
+    """Coarse grid-cell key so nearby route nodes reuse the same Overpass fetch."""
+    return f'{prefix}:{round(lat, OVERPASS_GEO_PRECISION)},{round(lon, OVERPASS_GEO_PRECISION)}'
+
+
+def reset_overpass_state() -> None:
+    """Reset breaker, mirror rotation, and cache — maintenance/test hook."""
+    global _overpass_mirror_index
+    _overpass_breaker.failures = 0
+    _overpass_breaker.opened_at = None
+    _overpass_mirror_index = 0
+    _CACHE.clear()
 
 
 def _wmo_to_weather_severity(code: Optional[int]) -> float:
@@ -172,28 +246,57 @@ def _fetch_slope(lat: float, lon: float) -> Tuple[Optional[float], str]:
 
 
 def _overpass_post(query: str) -> Optional[dict]:
+    """POST an Overpass query, rotating mirrors with exponential backoff.
+
+    Returns the parsed JSON on success, or ``None`` when every mirror fails or
+    the circuit-breaker is open (callers then fall back to cached/default data).
+    """
+    global _overpass_mirror_index
+
+    if _overpass_breaker.is_open():
+        print('[overpass] circuit open — short-circuiting to cached/default values')
+        return None
+
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded',
         **OVERPASS_HEADERS,
     }
-    for base_url in OVERPASS_URLS:
+    mirrors = OVERPASS_URLS
+    n = len(mirrors)
+    start = _overpass_mirror_index % n
+    _overpass_mirror_index = (start + 1) % n  # rotate the starting mirror for next call
+
+    for attempt in range(n):
+        base_url = mirrors[(start + attempt) % n]
         try:
             r = requests.post(
                 base_url,
                 data={'data': query},
                 headers=headers,
-                timeout=25,
+                timeout=OVERPASS_TIMEOUT,
             )
             if r.ok:
+                _overpass_breaker.record_success()
                 return r.json()
             print(f'[overpass] {base_url} HTTP {r.status_code}')
         except Exception as exc:
             print(f'[overpass] {base_url}: {exc}')
+
+        # this mirror failed: back off (with jitter) before trying the next one
+        if attempt < n - 1:
+            time.sleep(_overpass_backoff_delay(attempt))
+
+    _overpass_breaker.record_failure()
     return None
 
 
 def _fetch_noise(lat: float, lon: float) -> Tuple[Optional[float], str]:
     """Noise level 1–10 from OSM road/rail/industrial density (mirrors environmental.js)."""
+    cache_key = _geo_cache_key('overpass-noise', lat, lon)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached['value'], cached['source']
+
     radius = 50
     noise_query = f"""[out:json][timeout:15];(
         way["highway"~"motorway|trunk|primary|secondary"](around:{radius},{lat},{lon});
@@ -224,11 +327,18 @@ def _fetch_noise(lat: float, lon: float) -> Tuple[Optional[float], str]:
         if qtags.get('total') and int(qtags['total']) > 0:
             noise_level = max(1.0, noise_level - 2)
 
-    return min(10.0, max(1.0, noise_level)), 'OpenStreetMap-Overpass'
+    value = min(10.0, max(1.0, noise_level))
+    _cache_set(cache_key, {'value': value, 'source': 'OpenStreetMap-Overpass'})
+    return value, 'OpenStreetMap-Overpass'
 
 
 def _fetch_green_space(lat: float, lon: float) -> Tuple[Optional[float], str]:
     """Green-space score 1–10 from nearby parks/forests."""
+    cache_key = _geo_cache_key('overpass-green', lat, lon)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached['value'], cached['source']
+
     radius = 200
     query = f"""[out:json][timeout:25];(
         way["leisure"="park"](around:{radius},{lat},{lon});
@@ -251,6 +361,7 @@ def _fetch_green_space(lat: float, lon: float) -> Tuple[Optional[float], str]:
         except (TypeError, ValueError):
             total = 0
     score = min(10.0, max(1.0, 2.0 + total * 1.2))
+    _cache_set(cache_key, {'value': score, 'source': 'OpenStreetMap-Overpass'})
     return score, 'OpenStreetMap-Overpass'
 
 

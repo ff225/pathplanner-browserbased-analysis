@@ -1816,7 +1816,7 @@ body.directions-open .directions-toggle {
 
 .directions-panel {
     position: fixed;
-    top: calc(50% + 8px);
+    top: 16px;
     right: 16px;
     bottom: 16px;
     z-index: 1300;

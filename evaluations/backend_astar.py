@@ -21,12 +21,13 @@ from .environmental_astar import (
     apply_preference_poi_adjustment,
     haversine_m,
     precompute_poi_distances,
-    score_path_multifactor,
     tolerance_green_scale,
     tolerance_padding_deg,
 )
+from .air_quality_service import air_quality_service
 from .environmental_data_service import (
-    environmental_data_service,
+    _fetch_open_meteo_weather,
+    _fetch_slope,
     fetch_named_pois,
     fetch_street_graph,
 )
@@ -40,6 +41,9 @@ BACKEND_ASTAR_MAX_ENV_SAMPLES = int(os.getenv('BACKEND_ASTAR_MAX_ENV_SAMPLES', '
 BACKEND_ASTAR_ENV_RADIUS_M = float(os.getenv('BACKEND_ASTAR_ENV_RADIUS_M', '1800'))
 BACKEND_ASTAR_ENDPOINT_SNAP_M = float(os.getenv('BACKEND_ASTAR_ENDPOINT_SNAP_M', '2000'))
 BACKEND_ASTAR_MAX_ALTERNATIVE_ATTEMPTS = int(os.getenv('BACKEND_ASTAR_MAX_ALT_ATTEMPTS', '5'))
+BACKEND_ASTAR_OVERPASS_MAX_MIRRORS = int(os.getenv('BACKEND_ASTAR_OVERPASS_MAX_MIRRORS', '1'))
+BACKEND_ASTAR_STREET_TIMEOUT_SECONDS = float(os.getenv('BACKEND_ASTAR_STREET_TIMEOUT_SECONDS', '6'))
+BACKEND_ASTAR_POI_TIMEOUT_SECONDS = float(os.getenv('BACKEND_ASTAR_POI_TIMEOUT_SECONDS', '4'))
 
 POI_CATEGORIES = ('nature', 'entertainment', 'nightlife', 'tourism', 'hospital')
 
@@ -91,6 +95,8 @@ def _fetch_poi_lists_parallel(
     bbox: Dict[str, float],
     categories: Sequence[str],
     max_workers: int = BACKEND_ASTAR_IO_WORKERS,
+    timeout: float = BACKEND_ASTAR_POI_TIMEOUT_SECONDS,
+    max_mirrors: int = BACKEND_ASTAR_OVERPASS_MAX_MIRRORS,
 ) -> Dict[str, List[Tuple[float, float]]]:
     if not categories:
         return {}
@@ -108,6 +114,8 @@ def _fetch_poi_lists_parallel(
             bbox['min_lon'],
             bbox['max_lat'],
             bbox['max_lon'],
+            timeout=timeout,
+            max_mirrors=max_mirrors,
         )
         pois = [
             (float(poi['lat']), float(poi['lon']))
@@ -321,6 +329,58 @@ def _sample_environment_points(
     return points
 
 
+def _fetch_backend_environment_data(lat: float, lon: float) -> Dict[str, Any]:
+    """Fast real-only environmental snapshot for interactive backend A*.
+
+    This intentionally skips per-point Overpass noise/green lookups. OSM green
+    influence enters through the route-corridor POI fetch, and street class
+    influence enters through the graph edge metadata. Missing fields stay
+    ``None`` instead of being filled with synthetic defaults.
+    """
+    out: Dict[str, Any] = {
+        'temperature': None,
+        'humidity': None,
+        'weather': None,
+        'windSpeed': None,
+        'airQuality': None,
+        'slope': None,
+        'noise': None,
+        'greenSpace': None,
+        'dataSources': {},
+        'isDefault': True,
+        'timestamp': time.time(),
+    }
+
+    try:
+        weather = _fetch_open_meteo_weather(lat, lon)
+        for key in ('temperature', 'humidity', 'weather', 'windSpeed'):
+            out[key] = weather.get(key)
+        out['dataSources'].update(weather.get('sources') or {})
+        out['isDefault'] = False
+    except Exception as exc:
+        print(f'[backend_astar weather] {lat},{lon}: {exc}')
+
+    try:
+        air = air_quality_service.get_air_quality_data(lat, lon)
+        if not air.get('isDefault') and air.get('airQuality') is not None:
+            out['airQuality'] = float(air['airQuality'])
+            out['dataSources']['airQuality'] = air.get('source') or 'OpenAQ'
+            out['isDefault'] = False
+    except Exception as exc:
+        print(f'[backend_astar air] {lat},{lon}: {exc}')
+
+    try:
+        slope, slope_source = _fetch_slope(lat, lon)
+        if slope is not None:
+            out['slope'] = slope
+            out['dataSources']['slope'] = slope_source
+            out['isDefault'] = False
+    except Exception as exc:
+        print(f'[backend_astar slope] {lat},{lon}: {exc}')
+
+    return out
+
+
 def _prefetch_environment_samples(
     start: Dict[str, float],
     goal: Dict[str, float],
@@ -330,7 +390,7 @@ def _prefetch_environment_samples(
 
     def fetch(point: Dict[str, float]) -> Optional[Dict[str, Any]]:
         try:
-            env = environmental_data_service.get_environmental_data(point['lat'], point['lon'])
+            env = _fetch_backend_environment_data(point['lat'], point['lon'])
         except Exception:
             return None
         return {
@@ -358,6 +418,15 @@ def _nearest_env(node: Dict[str, float], samples: Sequence[Dict[str, Any]]) -> O
     if best and best_distance <= BACKEND_ASTAR_ENV_RADIUS_M:
         return best['env']
     return None
+
+
+def _aggregate_env_sources(samples: Sequence[Dict[str, Any]]) -> Dict[str, str]:
+    sources: Dict[str, str] = {}
+    for sample in samples:
+        for key, source in (sample.get('env') or {}).get('dataSources', {}).items():
+            if source and source != 'default':
+                sources[key] = source
+    return sources
 
 
 def _street_edge_penalty(edge: Optional[Dict[str, Any]], patient: Dict[str, Any], preferences: Optional[Dict[str, float]], green_scale: float) -> float:
@@ -610,6 +679,8 @@ def generate_backend_astar_routes(
             bbox['max_lat'],
             bbox['max_lon'],
             mode,
+            timeout=BACKEND_ASTAR_STREET_TIMEOUT_SECONDS,
+            max_mirrors=BACKEND_ASTAR_OVERPASS_MAX_MIRRORS,
         )
         poi_future = executor.submit(_fetch_poi_lists_parallel, bbox, active_categories)
         input_deadline = time.perf_counter() + BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS
@@ -669,10 +740,16 @@ def generate_backend_astar_routes(
         if not accepted:
             break
 
+    data_sources = _aggregate_env_sources(env_samples)
+    if poi_lists:
+        for category, pois in poi_lists.items():
+            if pois:
+                data_sources[f'poi_{category}'] = 'OpenStreetMap-Overpass'
+    data_sources['street_graph'] = base_graph['source']
+
     def score_route(route: Dict[str, Any]) -> Dict[str, Any]:
-        score, sources = score_path_multifactor(route['path'], condition, optimized=True)
-        route['env_score'] = score
-        route['data_sources'] = sources
+        route['env_score'] = round(max(0.0, 100.0 - (route.get('astar_cost') or 0.0) / 100.0), 1)
+        route['data_sources'] = data_sources
         return route
 
     if routes:

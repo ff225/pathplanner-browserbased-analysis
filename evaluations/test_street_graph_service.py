@@ -46,8 +46,8 @@ def _street_graph_payload():
 def test_fetch_street_graph_returns_real_osm_nodes_and_ways(monkeypatch):
     calls = []
 
-    def fake_overpass(query, breaker=None, timeout=None):
-        calls.append({'query': query, 'breaker': breaker, 'timeout': timeout})
+    def fake_overpass(query, breaker=None, timeout=None, max_mirrors=None):
+        calls.append({'query': query, 'breaker': breaker, 'timeout': timeout, 'max_mirrors': max_mirrors})
         return _street_graph_payload()
 
     monkeypatch.setattr(eds, '_overpass_post', fake_overpass)
@@ -62,6 +62,7 @@ def test_fetch_street_graph_returns_real_osm_nodes_and_ways(monkeypatch):
     assert result['ways'][1]['oneway'] == 'yes'
     assert calls[0]['breaker'] is eds._overpass_street_graph_breaker
     assert calls[0]['timeout'] == eds.OVERPASS_STREET_GRAPH_TIMEOUT
+    assert calls[0]['max_mirrors'] is None
     assert 'way["highway"~' in calls[0]['query']
     assert 'foot' in calls[0]['query']
 

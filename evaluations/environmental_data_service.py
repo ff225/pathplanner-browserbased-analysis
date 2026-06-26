@@ -259,6 +259,7 @@ def _overpass_post(
     query: str,
     breaker: Optional['_OverpassBreaker'] = None,
     timeout: Optional[float] = None,
+    max_mirrors: Optional[int] = None,
 ) -> Optional[dict]:
     """POST an Overpass query, rotating mirrors with exponential backoff.
 
@@ -289,7 +290,8 @@ def _overpass_post(
     start = _overpass_mirror_index % n
     _overpass_mirror_index = (start + 1) % n  # rotate the starting mirror for next call
 
-    for attempt in range(n):
+    attempts = n if max_mirrors is None else max(1, min(n, int(max_mirrors)))
+    for attempt in range(attempts):
         base_url = mirrors[(start + attempt) % n]
         try:
             r = requests.post(
@@ -306,7 +308,7 @@ def _overpass_post(
             print(f'[overpass] {base_url}: {exc}')
 
         # this mirror failed: back off (with jitter) before trying the next one
-        if attempt < n - 1:
+        if attempt < attempts - 1:
             time.sleep(_overpass_backoff_delay(attempt))
 
     breaker.record_failure()
@@ -476,7 +478,15 @@ def _poi_kind(tags: Dict[str, Any], kind_keys) -> Optional[str]:
 
 
 def fetch_named_pois(
-    category: str, min_lat: float, min_lon: float, max_lat: float, max_lon: float, limit: int = 120
+    category: str,
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    limit: int = 120,
+    *,
+    timeout: Optional[float] = None,
+    max_mirrors: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Real OSM POIs of a category inside a bounding box.
 
@@ -502,9 +512,15 @@ def fetch_named_pois(
 
     bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
     body = ''.join(f'{f}({bbox});' for f in config['filters'])
-    query = f'[out:json][timeout:{OVERPASS_POI_TIMEOUT}];({body});out tags center {int(limit)};'
+    query_timeout = int(timeout or OVERPASS_POI_TIMEOUT)
+    query = f'[out:json][timeout:{query_timeout}];({body});out tags center {int(limit)};'
 
-    data = _overpass_post(query, breaker=_overpass_poi_breaker, timeout=OVERPASS_POI_TIMEOUT)
+    data = _overpass_post(
+        query,
+        breaker=_overpass_poi_breaker,
+        timeout=timeout or OVERPASS_POI_TIMEOUT,
+        max_mirrors=max_mirrors,
+    )
     if data is None:
         raise RuntimeError('Overpass unavailable for POI lookup')
 
@@ -557,6 +573,9 @@ def fetch_street_graph(
     max_lat: float,
     max_lon: float,
     mode: str = 'walking',
+    *,
+    timeout: Optional[float] = None,
+    max_mirrors: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Fetch a real OSM street graph inside a route corridor bbox.
 
@@ -593,8 +612,9 @@ def fetch_street_graph(
     else:
         access_filter += '["motor_vehicle"!~"^(private|no)$"]'
 
+    query_timeout = int(timeout or OVERPASS_STREET_GRAPH_TIMEOUT)
     query = f"""
-        [out:json][timeout:{OVERPASS_STREET_GRAPH_TIMEOUT}];
+        [out:json][timeout:{query_timeout}];
         (
           way["highway"~"^({highways})$"]{access_filter}({bbox});
         );
@@ -605,7 +625,8 @@ def fetch_street_graph(
     data = _overpass_post(
         query,
         breaker=_overpass_street_graph_breaker,
-        timeout=OVERPASS_STREET_GRAPH_TIMEOUT,
+        timeout=timeout or OVERPASS_STREET_GRAPH_TIMEOUT,
+        max_mirrors=max_mirrors,
     )
     if data is None:
         raise RuntimeError('Overpass unavailable for street graph lookup')

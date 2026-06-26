@@ -362,6 +362,8 @@ def backend_astar_route(request):
         return JsonResponse(payload)
     except TimeoutError as exc:
         return JsonResponse({'error': str(exc)}, status=504)
+    except RuntimeError as exc:
+        return JsonResponse({'error': str(exc)}, status=503)
     except ValueError as exc:
         return JsonResponse({'error': str(exc)}, status=400)
     except Exception as exc:

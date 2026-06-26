@@ -430,7 +430,6 @@ export async function runOdPair({
         patientCondition,
         'walking',
         astarNumRoutes,
-        { includeWaypointPatterns: true },
     );
 
     const toRoute = pickPatternsToRoute(optimizedPatterns, baselineDistanceM);

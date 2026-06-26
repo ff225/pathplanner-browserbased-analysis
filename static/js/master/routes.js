@@ -731,6 +731,7 @@ function syncRouteComparisonLabels(routes) {
         }
 
         const isEnvironmentalAStar =
+            route.routingEngine === 'backend_environmental_astar' ||
             route.routingEngine === 'environmental_astar' ||
             /^Environmental A\*/i.test(route.originalRouteName || originalName);
 

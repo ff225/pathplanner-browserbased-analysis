@@ -293,53 +293,12 @@ document.addEventListener("DOMContentLoaded", function() {
         window.location.reload();
     });
 
-    // Add A* algorithm option to the UI
-    const optionsContainer = document.querySelector('.input-group');
-    if (optionsContainer) {
-        const astarCheckboxDiv = document.createElement('div');
-        astarCheckboxDiv.className = 'routing-mode-caption form-check form-switch';
-        astarCheckboxDiv.innerHTML = `
-            <input class="form-check-input" type="checkbox" id="useAStarAlgorithm" checked>
-            <label class="routing-mode-caption-label form-check-label" for="useAStarAlgorithm">Environmental A* smart routing (recommended)</label>
-            <span class="routing-mode-caption-help badge badge-info" data-toggle="tooltip" title="Uses A* algorithm to optimize routes based on real-time environmental data">?</span>
-        `;
-        
-        optionsContainer.appendChild(astarCheckboxDiv);
-
-        // Initialize tooltip
-        $(function () {
-            $('[data-toggle="tooltip"]').tooltip();
-        });
-    }
-
-    // Legacy mode toggle: persist the opt-in choice across reloads (default OFF).
-    const legacyToggle = document.getElementById('legacyMode');
-    if (legacyToggle) {
-        try {
-            legacyToggle.checked = localStorage.getItem('pp_legacyMode') === 'true';
-        } catch (e) {
-            legacyToggle.checked = false;
-        }
-        legacyToggle.addEventListener('change', function () {
-            try {
-                localStorage.setItem('pp_legacyMode', legacyToggle.checked ? 'true' : 'false');
-            } catch (e) {
-                /* localStorage unavailable: in-memory state still applies for this session */
-            }
-            window.PathPlannerMapState?.saveValue('legacyMode', legacyToggle.checked);
-        });
-    }
-
     async function restorePersistedControls() {
         const state = window.PathPlannerMapState;
         if (!state) return;
 
         state.restoreValue('transportMode', transportModeSelect);
         state.restoreValue('percentageSlider', percentageSliderControl);
-        state.restoreValue('legacyMode', legacyToggle);
-
-        const useAStarAlgorithm = document.getElementById('useAStarAlgorithm');
-        state.restoreValue('useAStarAlgorithm', useAStarAlgorithm);
 
         if (percentageSliderControl) {
             const percentageValue = document.getElementById('percentageValue');
@@ -366,7 +325,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
         state.bindValue('transportMode', transportModeSelect);
         state.bindValue('percentageSlider', percentageSliderControl, 'input');
-        state.bindValue('useAStarAlgorithm', useAStarAlgorithm);
     }
 
     restorePersistedControls();
@@ -395,18 +353,10 @@ document.addEventListener("DOMContentLoaded", function() {
         
         try {
         
-        // Check if A* algorithm is enabled
-        const useAStar = document.getElementById('useAStarAlgorithm')?.checked !== false;
         const isPatientMode =
             window.currentPatientCondition?.isPatientMode &&
             window.currentPatientCondition?.name !== 'default';
-        // Legacy mode (default OFF): restores the original gate `useAStar || isPatientMode`,
-        // so the environmental optimisation runs even without a pathology selected.
-        // OFF keeps the current behaviour bit-identical (`useAStar && isPatientMode`).
-        const legacy = document.getElementById('legacyMode')?.checked === true;
-        const useOptimizedRouting = legacy
-            ? (useAStar || isPatientMode)
-            : (useAStar && isPatientMode);
+        const useOptimizedRouting = isPatientMode;
         
         console.log("[routing.js] window.currentPatientCondition BEFORE A* or Route call:", JSON.stringify(window.currentPatientCondition, null, 2));
         console.log("[routing.js] window.currentPreferences BEFORE A* or Route call:", JSON.stringify(window.currentPreferences, null, 2));
@@ -423,8 +373,8 @@ document.addEventListener("DOMContentLoaded", function() {
                     map,
                     window.currentPatientCondition,
                     transportMode,
-                    isPatientMode ? 3 : 2,
-                    { preferAStar: useAStar, legacy, percentageSlider }
+                    3,
+                    { percentageSlider }
                 );
                 
                 // Convert to format expected by routes.js

@@ -427,7 +427,9 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
         
         // Check if we've reached the goal
         if (isGoalReached(current, goal)) {
-            const route = reconstructPath(cameFrom, current);
+            // Force the EXACT A/B endpoints: the goal-reaching node is only within
+            // 50 m of B, so snap/append B (and guarantee A) before returning.
+            const route = forceExactEndpoints(reconstructPath(cameFrom, current), start, goal);
             console.log(`Goal reached! Path found with ${route.length} nodes`);
             logEnvCostStats();
             return {
@@ -480,7 +482,7 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
     console.log("No complete path found, returning best partial route");
     logEnvCostStats();
     return {
-        route: bestRoute || [start, goal],
+        route: forceExactEndpoints(bestRoute || [start, goal], start, goal),
         environmentalScore: bestEnvironmentalScore
     };
 }
@@ -601,11 +603,18 @@ function getNeighbors(node, grid, resolution) {
  * @returns {Number} Cost value (g-score)
  */
 async function calculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, preferences = null, poiLists = null, poiDistances = null) {
-    // Base cost is the physical distance
+    // Base cost is the physical distance.
     const distance = calculateDistance(current, neighbor);
     const neighborId = nodeToId(neighbor);
-    let cost = currentGScore + distance;
-    
+    // P0 audit fix: accumulate a NET environmental penalty (positive worsens, the
+    // green/POI rewards subtract from it) into `penalty` instead of mutating the
+    // running cost directly. The edge increment is then `distance + max(0, penalty)`,
+    // so an arc can never cost LESS than its physical distance and never goes
+    // negative. This keeps the straight-line heuristic admissible/consistent
+    // (no negative weights → A* stays correct) while greener arcs still cost
+    // strictly less, down to the physical-distance floor.
+    let penalty = 0;
+
     // Environmental data hierarchy (Option B — real GUIDES selection, non-blocking):
     //   0) real low-res pre-fetch seed (isSynthetic:false) — colors the SELECTION cost
     //   1) pre-baked static tile cache (lookupEnv)
@@ -644,33 +653,33 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
         if (envData.airQuality !== null && envData.airQuality !== undefined) {
             // Air quality penalty (exponential for poor air quality)
             const airQualityPenalty = Math.pow(Math.max(0, envData.airQuality - 4), 2) * airQualityMultiplier;
-            cost += airQualityPenalty;
+            penalty += airQualityPenalty;
         }
-        
+
         if (envData.slope !== null && envData.slope !== undefined) {
             // Slope penalty (quadratic)
             const slopePenalty = Math.pow(Math.abs(envData.slope), 2) * slopeMultiplier / 5;
-            cost += slopePenalty;
+            penalty += slopePenalty;
         }
-        
+
         if (envData.noise !== null && envData.noise !== undefined) {
             // Noise penalty (linear with threshold)
             const noisePenalty = Math.max(0, envData.noise - 3) * noiseMultiplier;
-            cost += noisePenalty;
+            penalty += noisePenalty;
         }
-        
+
         if (envData.temperature !== null && envData.temperature !== undefined) {
             // Temperature penalty (based on deviation from ideal)
             const tempDiff = Math.abs(envData.temperature - 22); // Deviation from comfortable 22°C
             const tempPenalty = tempDiff * temperatureMultiplier / 3;
-            cost += tempPenalty;
+            penalty += tempPenalty;
         }
-        
+
         if (envData.humidity !== null && envData.humidity !== undefined) {
             // Humidity penalty (based on deviation from ideal)
             const humidityDiff = Math.abs(envData.humidity - 50); // Deviation from 50%
             const humidityPenalty = humidityDiff * humidityMultiplier / 10;
-            cost += humidityPenalty;
+            penalty += humidityPenalty;
         }
         
         // Apply condition-specific penalties
@@ -678,48 +687,48 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
             case "respiratory":
                 // Higher penalties for areas with high traffic density
                 if (envData.trafficDensity) {
-                    cost += envData.trafficDensity * airQualityMultiplier * 10;
+                    penalty += envData.trafficDensity * airQualityMultiplier * 10;
                 }
                 // Lower cost for green areas (scaled by distance tolerance)
                 if (envData.greenVisibility) {
-                    cost -= envData.greenVisibility * 5 * toleranceGreenScale();
+                    penalty -= envData.greenVisibility * 5 * toleranceGreenScale();
                 }
                 break;
 
             case "cardiac":
                 // Higher penalties for steep slopes
                 if (envData.slope) {
-                    cost += Math.pow(Math.abs(envData.slope), 2) * slopeMultiplier / 2;
+                    penalty += Math.pow(Math.abs(envData.slope), 2) * slopeMultiplier / 2;
                 }
                 // Higher penalties for areas far from emergency services
                 if (envData.emergencyAccessibility) {
-                    cost += envData.emergencyAccessibility * 2;
+                    penalty += envData.emergencyAccessibility * 2;
                 }
                 break;
-                
+
             case "mobility":
                 // Extremely high penalties for steep slopes
                 if (envData.slope) {
-                    cost += Math.pow(Math.abs(envData.slope), 2.5) * slopeMultiplier;
+                    penalty += Math.pow(Math.abs(envData.slope), 2.5) * slopeMultiplier;
                 }
                 // Penalties for poor surface quality
                 if (envData.surfaceQuality) {
-                    cost += envData.surfaceQuality * 15;
+                    penalty += envData.surfaceQuality * 15;
                 }
                 break;
-                
+
             case "mental":
                 // Higher penalties for noisy areas
                 if (envData.noise) {
-                    cost += Math.pow(envData.noise, 1.5) * noiseMultiplier;
+                    penalty += Math.pow(envData.noise, 1.5) * noiseMultiplier;
                 }
                 // Higher penalties for areas with high sensory load
                 if (envData.sensoryLoad) {
-                    cost += envData.sensoryLoad * 2;
+                    penalty += envData.sensoryLoad * 2;
                 }
                 // Lower cost for green areas (scaled by distance tolerance)
                 if (envData.greenVisibility) {
-                    cost -= envData.greenVisibility * 8 * toleranceGreenScale();
+                    penalty -= envData.greenVisibility * 8 * toleranceGreenScale();
                 }
                 break;
         }
@@ -734,19 +743,19 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
         const combinedHospital = (patientCondition.patientHospital || 0) + (preferences?.hospital || 0);
 
         if (combinedNature !== 0 && envData.greenVisibility != null) {
-            cost -= envData.greenVisibility * combinedNature * 0.8 * toleranceGreenScale();
+            penalty -= envData.greenVisibility * combinedNature * 0.8 * toleranceGreenScale();
         }
         if (combinedHospital !== 0 && envData.emergencyAccessibility != null) {
-            cost -= envData.emergencyAccessibility * combinedHospital * 0.8;
+            penalty -= envData.emergencyAccessibility * combinedHospital * 0.8;
         }
         if (combinedEntertainment !== 0 && envData.noise != null) {
-            cost -= (envData.noise / 10) * combinedEntertainment * 0.8;
+            penalty -= (envData.noise / 10) * combinedEntertainment * 0.8;
         }
         if (combinedNightlife !== 0 && envData.noise != null) {
-            cost -= (envData.noise / 10) * combinedNightlife * 0.8;
+            penalty -= (envData.noise / 10) * combinedNightlife * 0.8;
         }
         if (combinedTourism !== 0 && envData.greenVisibility != null) {
-            cost -= envData.greenVisibility * combinedTourism * 0.8 * toleranceGreenScale();
+            penalty -= envData.greenVisibility * combinedTourism * 0.8 * toleranceGreenScale();
         }
     }
 
@@ -759,12 +768,15 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
             const weight = (patientCondition?.[patientKey] || 0) + (preferences?.[category] || 0);
             if (weight !== 0) {
                 const nearestDist = distances?.[category] ?? nearestPoiDistance(neighbor, poiLists?.[category]);
-                cost = applyPreferencePoiAdjustment(cost, weight, nearestDist);
+                penalty = applyPreferencePoiAdjustment(penalty, weight, nearestDist);
             }
         }
     }
-    
-    return cost;
+
+    // P0 audit fix: floor the net penalty at 0 so the edge increment is always
+    // >= physical distance (NO negative arc weights). Greener/closer-to-POI arcs
+    // are still cheaper, but never below the straight-line distance.
+    return currentGScore + distance + Math.max(0, penalty);
 }
 
 /**
@@ -864,13 +876,51 @@ function nodeToId(node) {
 function reconstructPath(cameFrom, current) {
     const path = [current];
     let currentId = nodeToId(current);
-    
+
     while (cameFrom[currentId]) {
         current = cameFrom[currentId];
         path.unshift(current);
         currentId = nodeToId(current);
     }
-    
+
+    return path;
+}
+
+/**
+ * Force the EXACT requested A (start) and B (goal) as the first/last path nodes.
+ *
+ * The A* search runs on a free grid whose nodes do NOT coincide with the real
+ * endpoints, and goal is "reached" at any grid node within 50 m of B. Without
+ * this snap the reconstructed corridor begins/ends on an off-target grid node,
+ * so downstream Mapbox/ORS snapping would route from/to the wrong point. We snap
+ * an endpoint already within 0.5 m to the exact coordinate, otherwise append the
+ * exact endpoint so the corridor is completed to A/B.
+ * @param {Array} route - reconstructed A* path
+ * @param {Object} start - exact A {lat, lon}
+ * @param {Object} goal - exact B {lat, lon}
+ * @returns {Array} path whose endpoints are exactly A and B
+ */
+function forceExactEndpoints(route, start, goal) {
+    const startNode = { lat: start.lat, lon: start.lon };
+    const goalNode = { lat: goal.lat, lon: goal.lon };
+    if (!Array.isArray(route) || route.length === 0) {
+        return [startNode, goalNode];
+    }
+    const path = route.slice();
+    const SNAP_TOLERANCE_M = 0.5;
+
+    if (calculateDistance(path[0], startNode) > SNAP_TOLERANCE_M) {
+        path.unshift(startNode);
+    } else {
+        path[0] = startNode;
+    }
+
+    if (calculateDistance(path[path.length - 1], goalNode) > SNAP_TOLERANCE_M) {
+        path.push(goalNode);
+    } else {
+        path[path.length - 1] = goalNode;
+    }
+
     return path;
 }
 

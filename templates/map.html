@@ -138,12 +138,14 @@
                 <div class="control-block layer-block">
                     <label class="form-label"><strong>Layers</strong></label>
                     <div class="layer-grid" role="group" aria-label="Air quality and pollen layers">
-                        <button type="button" class="layer-chip" id="pm25">PM2.5</button>
-                        <button type="button" class="layer-chip" id="pm10">PM10</button>
-                        <button type="button" class="layer-chip" id="no2">NO₂</button>
-                        <button type="button" class="layer-chip" id="o3">O₃</button>
-                        <button type="button" class="layer-chip layer-chip--pollen" id="pollen">Pollen</button>
+                        <button type="button" class="layer-chip" id="pm25" aria-label="Toggle PM2.5 fine particulate matter heatmap in micrograms per cubic meter" aria-pressed="false" data-toggle="tooltip" title="PM2.5: fine particles ≤2.5 µm, station values normalized in µg/m³.">PM2.5</button>
+                        <button type="button" class="layer-chip" id="pm10" aria-label="Toggle PM10 inhalable particulate matter heatmap in micrograms per cubic meter" aria-pressed="false" data-toggle="tooltip" title="PM10: inhalable particles ≤10 µm, station values normalized in µg/m³.">PM10</button>
+                        <button type="button" class="layer-chip" id="no2" aria-label="Toggle nitrogen dioxide heatmap in micrograms per cubic meter" aria-pressed="false" data-toggle="tooltip" title="NO₂: nitrogen dioxide, mainly traffic and combustion pollution in µg/m³.">NO₂</button>
+                        <button type="button" class="layer-chip" id="o3" aria-label="Toggle ground-level ozone heatmap in micrograms per cubic meter" aria-pressed="false" data-toggle="tooltip" title="O₃: ground-level ozone, station values normalized in µg/m³.">O₃</button>
+                        <button type="button" class="layer-chip layer-chip--pollen" id="pollen" aria-label="Toggle total pollen forecast heatmap in grains per cubic meter" aria-pressed="false" data-toggle="tooltip" title="Pollen: Open-Meteo total airborne pollen forecast near the selected start point.">Pollen</button>
                     </div>
+                    <div id="layerStatus" class="small text-muted mt-2" role="status" aria-live="polite"></div>
+                    <div id="layerLegend" class="small mt-2" aria-live="polite" hidden></div>
                 </div>
                 
                 <hr class="sidebar-divider">

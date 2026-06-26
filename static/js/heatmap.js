@@ -9,21 +9,48 @@ document.addEventListener("DOMContentLoaded", function() {
 
     var allStationMarkers = {};
     var activeLayerIds = new Set();
+    var pendingAirLayerIds = new Set();
 
     var heatLayers = {};
     var layerMarkers = {};
+    var layerStates = {};
+    var layerStatusElement = document.getElementById('layerStatus');
+    var layerLegendElement = document.getElementById('layerLegend');
+
+    var AIR_LAYER_IDS = ['pm25', 'pm10', 'no2', 'o3'];
+    var ALL_LAYER_IDS = AIR_LAYER_IDS.concat(['pollen']);
+
+    var HEAT_GRADIENT = {
+        0.0: 'blue',
+        0.2: 'cyan',
+        0.4: 'lime',
+        0.6: 'yellow',
+        0.8: 'orange',
+        1.0: 'red'
+    };
+
+    var AIR_GRADIENT_STOPS = [
+        { color: 'blue', position: '0%' },
+        { color: 'cyan', position: '20%' },
+        { color: 'lime', position: '40%' },
+        { color: 'yellow', position: '60%' },
+        { color: 'orange', position: '80%' },
+        { color: 'red', position: '100%' }
+    ];
+
+    var POLLEN_GRADIENT_STOPS = [
+        { color: '#d9f99d', position: '0%' },
+        { color: '#84cc16', position: '25%' },
+        { color: '#eab308', position: '50%' },
+        { color: '#f97316', position: '75%' },
+        { color: '#a16207', position: '100%' }
+    ];
 
     var baseHeatOptions = {
         radius: 55,
         blur: 100,
-        gradient: {
-            0.0: 'blue',
-            0.2: 'cyan',
-            0.4: 'lime',
-            0.6: 'yellow',
-            0.8: 'orange',
-            1.0: 'red'
-        }
+        max: 1.0,
+        gradient: HEAT_GRADIENT
     };
 
     var pollenHeatOptions = {
@@ -39,16 +66,304 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     };
 
-    function generateDummyPoints(centerLat, centerLng, value, numPoints, maxDistance) {
-        var points = [];
-        for (var i = 0; i < numPoints; i++) {
-            var angle = Math.random() * Math.PI * 2;
-            var distance = Math.random() * maxDistance;
-            var offsetLat = centerLat + (distance * Math.cos(angle)) / 111000;
-            var offsetLng = centerLng + (distance * Math.sin(angle)) / (111000 * Math.cos(centerLat * Math.PI / 180));
-            points.push([offsetLat, offsetLng, value * 0.2]);
+    var LAYER_CONFIG = {
+        pm25: {
+            label: 'PM2.5',
+            unit: 'µg/m³',
+            referenceMax: 25,
+            highLabel: '25+ µg/m³',
+            gradientStops: AIR_GRADIENT_STOPS,
+            markerColor: '#2563eb',
+            emptyMessage: 'No PM2.5 readings are available in the latest station dataset.',
+            meaning: 'Fine particulate matter (≤2.5 µm) that can travel deep into the lungs.',
+            source: 'Real station measurements, normalized to a 25 µg/m³ reference scale. The heat field is interpolated around station points.'
+        },
+        pm10: {
+            label: 'PM10',
+            unit: 'µg/m³',
+            referenceMax: 50,
+            highLabel: '50+ µg/m³',
+            gradientStops: AIR_GRADIENT_STOPS,
+            markerColor: '#7c3aed',
+            emptyMessage: 'No PM10 readings are available in the latest station dataset.',
+            meaning: 'Inhalable particulate matter (≤10 µm), often from dust, traffic, and combustion.',
+            source: 'Real station measurements, normalized to a 50 µg/m³ reference scale. The heat field is interpolated around station points.'
+        },
+        no2: {
+            label: 'NO₂',
+            unit: 'µg/m³',
+            referenceMax: 200,
+            highLabel: '200+ µg/m³',
+            gradientStops: AIR_GRADIENT_STOPS,
+            markerColor: '#dc2626',
+            emptyMessage: 'No NO₂ readings are available in the latest station dataset.',
+            meaning: 'Nitrogen dioxide, mainly tied to combustion and roadside traffic pollution.',
+            source: 'Real station measurements, normalized to a 200 µg/m³ reference scale. The heat field is interpolated around station points.'
+        },
+        o3: {
+            label: 'O₃',
+            unit: 'µg/m³',
+            referenceMax: 180,
+            highLabel: '180+ µg/m³',
+            gradientStops: AIR_GRADIENT_STOPS,
+            markerColor: '#ea580c',
+            emptyMessage: 'No O₃ readings are available in the latest station dataset.',
+            meaning: 'Ground-level ozone, a secondary pollutant that often rises on sunny stagnant days.',
+            source: 'Real station measurements, normalized to a 180 µg/m³ reference scale. The heat field is interpolated around station points.'
+        },
+        pollen: {
+            label: 'Pollen',
+            unit: 'grains/m³',
+            referenceMax: 120,
+            highLabel: '120+ grains/m³',
+            gradientStops: POLLEN_GRADIENT_STOPS,
+            markerColor: '#65a30d',
+            emptyMessage: 'No pollen data is available for this area or season.',
+            meaning: 'Total airborne pollen forecast near the selected start point.',
+            source: 'Real Open-Meteo pollen forecast, rendered as an areal field around the selected city.'
         }
-        return points;
+    };
+
+    var stationDataState = {
+        loading: true,
+        loaded: false,
+        error: null,
+        stationCount: 0
+    };
+
+    // Deterministic station spread: measurement intensity is real, positions are
+    // fixed interpolation samples around the station so the heatmap is readable.
+    var STATION_SPREAD_OFFSETS = (function() {
+        var offsets = [];
+        var rings = [250, 550, 900, 1250];
+        rings.forEach(function(radius, ringIndex) {
+            var count = 8 + ringIndex * 4;
+            for (var k = 0; k < count; k++) {
+                var angle = (2 * Math.PI * k) / count;
+                offsets.push([radius * Math.cos(angle), radius * Math.sin(angle)]);
+            }
+        });
+        return offsets;
+    })();
+
+    function initializeLayerStates() {
+        ALL_LAYER_IDS.forEach(function(layerId) {
+            heatLayers[layerId] = null;
+            layerMarkers[layerId] = [];
+            layerStates[layerId] = {
+                status: layerId === 'pollen' ? 'idle' : 'loading',
+                count: 0,
+                min: null,
+                max: null,
+                total: null,
+                dominantLabel: null,
+                message: ''
+            };
+        });
+    }
+
+    initializeLayerStates();
+
+    function escapeHtml(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function formatNumber(value) {
+        var numeric = Number(value);
+        if (!isFinite(numeric)) {
+            return 'n/d';
+        }
+        var rounded = Math.round(numeric * 10) / 10;
+        return Math.abs(rounded % 1) < 0.001 ? rounded.toFixed(0) : rounded.toFixed(1);
+    }
+
+    function normalizeToUnit(value, referenceMax, minVisible) {
+        var numeric = Number(value);
+        if (!isFinite(numeric) || numeric <= 0) {
+            return 0;
+        }
+        return Math.max(minVisible || 0.06, Math.min(1, numeric / referenceMax));
+    }
+
+    function readMeasurement(stazione, layerId) {
+        if (!stazione || stazione[layerId] === null || stazione[layerId] === undefined || stazione[layerId] === '') {
+            return null;
+        }
+        var value = Number(stazione[layerId]);
+        return isFinite(value) ? value : null;
+    }
+
+    function stationLatLng(stazione) {
+        var lat = Number(stazione && stazione.lat);
+        var lng = Number(stazione && stazione.lng);
+        if (!isFinite(lat) || !isFinite(lng)) {
+            return null;
+        }
+        return { lat: lat, lng: lng };
+    }
+
+    function offsetPoint(centerLat, centerLng, offsetX, offsetY) {
+        var metresPerDegLng = 111000 * Math.cos(centerLat * Math.PI / 180);
+        if (!isFinite(metresPerDegLng) || Math.abs(metresPerDegLng) < 1) {
+            metresPerDegLng = 1;
+        }
+        return [
+            centerLat + offsetY / 111000,
+            centerLng + offsetX / metresPerDegLng
+        ];
+    }
+
+    function buildStationSpread(centerLat, centerLng, intensity) {
+        return STATION_SPREAD_OFFSETS.map(function(offset) {
+            var point = offsetPoint(centerLat, centerLng, offset[0], offset[1]);
+            return [point[0], point[1], intensity * 0.55];
+        });
+    }
+
+    function recordStats(stats, value) {
+        stats.count += 1;
+        stats.min = stats.min === null ? value : Math.min(stats.min, value);
+        stats.max = stats.max === null ? value : Math.max(stats.max, value);
+    }
+
+    function buildStationPopup(stazione) {
+        function pollutantLine(layerId) {
+            var config = LAYER_CONFIG[layerId];
+            var value = readMeasurement(stazione, layerId);
+            var label = escapeHtml(config.label);
+            var renderedValue = value !== null ? formatNumber(value) + ' ' + config.unit : 'N/A';
+            return '<strong>' + label + '</strong>: ' + escapeHtml(renderedValue);
+        }
+
+        return '<b>' + escapeHtml(stazione.nome || 'Station') + ' (' + escapeHtml(stazione.cod || 'n/d') + ')</b><br>' +
+            escapeHtml(stazione.ind || '') + '<br>' +
+            escapeHtml(stazione.com || '') + ', ' + escapeHtml(stazione.prov || '') + '<hr>' +
+            pollutantLine('pm10') + '<hr>' +
+            pollutantLine('pm25') + '<hr>' +
+            pollutantLine('no2') + '<hr>' +
+            pollutantLine('o3');
+    }
+
+    function updateLayerButton(layerId) {
+        var button = document.getElementById(layerId);
+        if (!button) {
+            return;
+        }
+        var active = activeLayerIds.has(layerId);
+        var loading = pendingAirLayerIds.has(layerId) || (layerId === 'pollen' && pollenState.loading);
+        button.classList.toggle('active-layer', active);
+        button.classList.toggle('loading', loading);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        button.setAttribute('aria-busy', loading ? 'true' : 'false');
+    }
+
+    function updateAllLayerButtons() {
+        ALL_LAYER_IDS.forEach(updateLayerButton);
+    }
+
+    function buildGradientCss(stops) {
+        return 'linear-gradient(90deg, ' + stops.map(function(stop) {
+            return stop.color + ' ' + stop.position;
+        }).join(', ') + ')';
+    }
+
+    function layerSummary(layerId) {
+        var config = LAYER_CONFIG[layerId];
+        var state = layerStates[layerId];
+
+        if (layerId === 'pollen') {
+            if (state && state.total !== null) {
+                var dominant = state.dominantLabel ? ', highest: ' + state.dominantLabel : '';
+                return config.label + ': ' + formatNumber(state.total) + ' ' + config.unit + dominant;
+            }
+            return config.label + ': active';
+        }
+
+        if (!state || !state.count) {
+            return config.label + ': no readings';
+        }
+        var stationWord = state.count === 1 ? 'station' : 'stations';
+        return config.label + ': ' + state.count + ' ' + stationWord + ' (' +
+            formatNumber(state.min) + '-' + formatNumber(state.max) + ' ' + config.unit + ')';
+    }
+
+    function defaultStatusMessage(activeIds) {
+        if (activeIds.length) {
+            return 'Showing ' + activeIds.map(layerSummary).join(' | ');
+        }
+        if (stationDataState.loading) {
+            return 'Air-quality station data is loading. Pollen loads from Open-Meteo for the selected start point.';
+        }
+        if (stationDataState.error) {
+            return 'Air-quality station data could not be loaded. Pollen can still be requested.';
+        }
+        if (stationDataState.stationCount === 0) {
+            return 'No air-quality stations were returned. Pollen can still be requested.';
+        }
+        return 'Air-quality layers ready from ' + stationDataState.stationCount + ' stations. Pollen loads from Open-Meteo.';
+    }
+
+    function buildLegendItem(layerId) {
+        var config = LAYER_CONFIG[layerId];
+        var state = layerStates[layerId] || {};
+        var detail;
+
+        if (layerId === 'pollen' && state.total !== null) {
+            detail = 'Current total: ' + formatNumber(state.total) + ' ' + config.unit;
+            if (state.dominantLabel) {
+                detail += ' · highest: ' + state.dominantLabel;
+            }
+        } else if (state.count) {
+            detail = state.count + ' station' + (state.count === 1 ? '' : 's') +
+                ' · observed ' + formatNumber(state.min) + '-' + formatNumber(state.max) + ' ' + config.unit;
+        } else if (state.status === 'loading') {
+            detail = 'Loading current values...';
+        } else {
+            detail = config.emptyMessage;
+        }
+
+        return '<div class="layer-legend-item" style="border:1px solid rgba(15,23,42,0.16);border-radius:8px;padding:8px 9px;margin-top:8px;background:rgba(255,255,255,0.72);">' +
+            '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;font-weight:700;">' +
+                '<span>' + escapeHtml(config.label) + '</span>' +
+                '<span style="font-size:0.74rem;color:#475569;">' + escapeHtml(config.unit) + '</span>' +
+            '</div>' +
+            '<div style="height:8px;border-radius:999px;margin:7px 0 4px;background:' + buildGradientCss(config.gradientStops) + ';" aria-hidden="true"></div>' +
+            '<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:#475569;">' +
+                '<span>Low</span><span>' + escapeHtml(config.highLabel) + '</span>' +
+            '</div>' +
+            '<div style="font-size:0.75rem;color:#334155;margin-top:6px;line-height:1.25;">' + escapeHtml(config.meaning) + '</div>' +
+            '<div style="font-size:0.72rem;color:#64748b;margin-top:5px;line-height:1.25;">' + escapeHtml(detail) + '</div>' +
+            '<div style="font-size:0.68rem;color:#64748b;margin-top:4px;line-height:1.2;">' + escapeHtml(config.source) + '</div>' +
+        '</div>';
+    }
+
+    function renderLayerUI(message) {
+        updateAllLayerButtons();
+
+        var activeIds = ALL_LAYER_IDS.filter(function(layerId) {
+            return activeLayerIds.has(layerId);
+        });
+        var statusMessage = message || defaultStatusMessage(activeIds);
+
+        if (layerStatusElement) {
+            layerStatusElement.textContent = statusMessage;
+            layerStatusElement.hidden = !statusMessage;
+        }
+
+        if (layerLegendElement) {
+            if (activeIds.length) {
+                layerLegendElement.innerHTML = activeIds.map(buildLegendItem).join('');
+                layerLegendElement.hidden = false;
+            } else {
+                layerLegendElement.innerHTML = '';
+                layerLegendElement.hidden = true;
+            }
+        }
     }
 
     // ---- Real pollen layer (Open-Meteo, tied to the selected city) ----
@@ -61,7 +376,7 @@ document.addEventListener("DOMContentLoaded", function() {
         ragweed: 'Ragweed'
     };
     // Total grains/m³ mapped to the top of the gradient (a strong, real pollen day).
-    var POLLEN_REFERENCE_MAX = 120;
+    var POLLEN_REFERENCE_MAX = LAYER_CONFIG.pollen.referenceMax;
     var pollenState = { loadedKey: null, loading: false, hasData: false };
 
     // Deterministic areal spread: the Open-Meteo value is a single ~11km grid cell
@@ -119,32 +434,76 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     }
 
+    function dominantPollenLabel(payload) {
+        var dominant = null;
+        Object.keys(POLLEN_TYPE_LABELS).forEach(function(type) {
+            var entry = payload.pollen && payload.pollen[type];
+            var value = entry && entry.value !== null && entry.value !== undefined ? Number(entry.value) : null;
+            if (value !== null && isFinite(value) && (!dominant || value > dominant.value)) {
+                dominant = { label: POLLEN_TYPE_LABELS[type], value: value };
+            }
+        });
+        return dominant ? dominant.label + ' (' + formatNumber(dominant.value) + ' grains/m³)' : null;
+    }
+
     function buildPollenPopup(payload) {
         var rows = '';
         Object.keys(POLLEN_TYPE_LABELS).forEach(function(type) {
             var entry = payload.pollen && payload.pollen[type];
             var hasValue = entry && entry.value !== null && entry.value !== undefined;
-            var value = hasValue ? entry.value + ' grains/m³' : 'n/d';
-            rows += '<div>' + POLLEN_TYPE_LABELS[type] + ': <strong>' + value + '</strong></div>';
+            var value = hasValue ? formatNumber(entry.value) + ' grains/m³' : 'n/d';
+            rows += '<div>' + escapeHtml(POLLEN_TYPE_LABELS[type]) + ': <strong>' + escapeHtml(value) + '</strong></div>';
         });
-        var when = payload.timestamp ? '<br><small>' + payload.timestamp + ' UTC</small>' : '';
+        var when = payload.timestamp ? '<br><small>' + escapeHtml(payload.timestamp) + ' UTC</small>' : '';
         return '<strong>Pollen (Open-Meteo, real)</strong><br>' + rows +
-            '<hr style="margin:4px 0">Total: ' + payload.total + ' grains/m³' + when;
+            '<hr style="margin:4px 0">Total: ' + escapeHtml(formatNumber(payload.total) + ' grains/m³') + when;
+    }
+
+    function removeHeatLayer(layerId) {
+        if (heatLayers[layerId] && map.hasLayer(heatLayers[layerId])) {
+            map.removeLayer(heatLayers[layerId]);
+        }
     }
 
     function removePollenLayer() {
-        if (heatLayers.pollen && map.hasLayer(heatLayers.pollen)) {
-            map.removeLayer(heatLayers.pollen);
+        removeHeatLayer('pollen');
+    }
+
+    function activateLayer(layerId) {
+        var heat = heatLayers[layerId];
+        if (!heat) {
+            return false;
         }
+        if (!map.hasLayer(heat)) {
+            map.addLayer(heat);
+        }
+        activeLayerIds.add(layerId);
+        updateVisibleMarkers();
+        return true;
+    }
+
+    function deactivateLayer(layerId) {
+        removeHeatLayer(layerId);
+        activeLayerIds.delete(layerId);
+        updateVisibleMarkers();
     }
 
     function loadPollenLayer(center, onReady) {
         pollenState.loading = true;
+        layerStates.pollen.status = 'loading';
+        layerStates.pollen.message = 'Loading pollen forecast near the selected point...';
+        renderLayerUI(layerStates.pollen.message);
+
         var url = '/api/pollen/?lat=' + encodeURIComponent(center.lat) +
             '&lon=' + encodeURIComponent(center.lon);
 
         fetch(url)
-            .then(function(response) { return response.json(); })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.json();
+            })
             .then(function(payload) {
                 pollenState.loading = false;
                 pollenState.loadedKey = pollenCenterKey(center);
@@ -154,13 +513,26 @@ document.addEventListener("DOMContentLoaded", function() {
                     pollenState.hasData = false;
                     heatLayers.pollen = null;
                     layerMarkers.pollen = [];
+                    layerStates.pollen = {
+                        status: 'empty',
+                        count: 0,
+                        min: null,
+                        max: null,
+                        total: null,
+                        dominantLabel: null,
+                        message: LAYER_CONFIG.pollen.emptyMessage
+                    };
                     notifyPollen('No pollen data for this area (off-season or outside Europe).', 'info');
+                    renderLayerUI(layerStates.pollen.message);
                     onReady(false);
                     return;
                 }
 
                 pollenState.hasData = true;
-                var intensity = Math.max(0.08, Math.min(1, payload.total / POLLEN_REFERENCE_MAX));
+                var total = Number(payload.total);
+                var intensity = normalizeToUnit(total, POLLEN_REFERENCE_MAX, 0.08);
+                var dominantLabel = dominantPollenLabel(payload);
+
                 heatLayers.pollen = L.heatLayer(buildPollenHeatData(center, intensity), pollenHeatOptions);
 
                 var marker = L.circleMarker([payload.lat, payload.lon], {
@@ -169,7 +541,17 @@ document.addEventListener("DOMContentLoaded", function() {
                     fillColor: '#84cc16',
                     fillOpacity: 0.75
                 }).bindPopup(buildPollenPopup(payload));
+                marker._pathplannerStationCode = 'pollen-' + pollenCenterKey(center);
                 layerMarkers.pollen = [marker];
+                layerStates.pollen = {
+                    status: 'ready',
+                    count: 1,
+                    min: null,
+                    max: null,
+                    total: isFinite(total) ? total : 0,
+                    dominantLabel: dominantLabel,
+                    message: ''
+                };
                 onReady(true);
             })
             .catch(function(error) {
@@ -177,19 +559,35 @@ document.addEventListener("DOMContentLoaded", function() {
                 pollenState.hasData = false;
                 heatLayers.pollen = null;
                 layerMarkers.pollen = [];
+                layerStates.pollen = {
+                    status: 'error',
+                    count: 0,
+                    min: null,
+                    max: null,
+                    total: null,
+                    dominantLabel: null,
+                    message: 'Could not load pollen data.'
+                };
                 console.error('[pollen] fetch failed', error);
                 notifyPollen('Could not load pollen data.', 'error');
+                renderLayerUI(layerStates.pollen.message);
                 onReady(false);
             });
     }
 
     function updateVisibleMarkers() {
+        var seenMarkerIds = {};
+
         markers.clearLayers();
         activeLayerIds.forEach(function(id) {
             var layerMarkerList = layerMarkers[id];
             if (layerMarkerList) {
                 layerMarkerList.forEach(function(marker) {
-                    markers.addLayer(marker);
+                    var markerId = marker._pathplannerStationCode || L.stamp(marker);
+                    if (!seenMarkerIds[markerId]) {
+                        markers.addLayer(marker);
+                        seenMarkerIds[markerId] = true;
+                    }
                 });
             }
         });
@@ -201,28 +599,38 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     }
 
-    function toggleLayer(layerId) {
-        var heat = heatLayers[layerId];
-        var button = document.getElementById(layerId);
-        if (!heat || !button) {
+    function toggleAirLayer(layerId) {
+        var config = LAYER_CONFIG[layerId];
+
+        if (activeLayerIds.has(layerId)) {
+            deactivateLayer(layerId);
+            renderLayerUI();
             return;
         }
 
-        if (activeLayerIds.has(layerId)) {
-            if (map.hasLayer(heat)) {
-                map.removeLayer(heat);
+        if (stationDataState.loading) {
+            if (pendingAirLayerIds.has(layerId)) {
+                pendingAirLayerIds.delete(layerId);
+                renderLayerUI(config.label + ' request cancelled. Station data is still loading.');
+            } else {
+                pendingAirLayerIds.add(layerId);
+                renderLayerUI(config.label + ' will appear when station data finishes loading.');
             }
-            activeLayerIds.delete(layerId);
-            button.classList.remove('active-layer');
-        } else {
-            if (!map.hasLayer(heat)) {
-                map.addLayer(heat);
-            }
-            activeLayerIds.add(layerId);
-            button.classList.add('active-layer');
+            return;
         }
 
-        updateVisibleMarkers();
+        if (stationDataState.error) {
+            renderLayerUI('Air-quality station data could not be loaded. ' + config.label + ' is unavailable; pollen can still be requested.');
+            return;
+        }
+
+        if (!layerStates[layerId] || layerStates[layerId].status !== 'ready' || !heatLayers[layerId]) {
+            renderLayerUI(config.emptyMessage);
+            return;
+        }
+
+        activateLayer(layerId);
+        renderLayerUI();
     }
 
     function registerLayerButton(layerId) {
@@ -230,26 +638,26 @@ document.addEventListener("DOMContentLoaded", function() {
         if (!button) {
             return;
         }
+        button.setAttribute('aria-pressed', 'false');
+        button.setAttribute('aria-busy', 'false');
         button.addEventListener('click', function() {
-            toggleLayer(layerId);
+            if (layerId === 'pollen') {
+                togglePollen();
+                return;
+            }
+            toggleAirLayer(layerId);
         });
     }
 
     function togglePollen() {
-        var button = document.getElementById('pollen');
-        if (!button) {
-            return;
-        }
-
         if (activeLayerIds.has('pollen')) {
-            removePollenLayer();
-            activeLayerIds.delete('pollen');
-            button.classList.remove('active-layer');
-            updateVisibleMarkers();
+            deactivateLayer('pollen');
+            renderLayerUI();
             return;
         }
 
         if (pollenState.loading) {
+            renderLayerUI('Pollen forecast is still loading.');
             return;
         }
 
@@ -259,33 +667,126 @@ document.addEventListener("DOMContentLoaded", function() {
 
         var activate = function(hasData) {
             if (!hasData) {
-                // Honest empty state: no markers, no heat — only the note already shown.
+                renderLayerUI(layerStates.pollen.message || LAYER_CONFIG.pollen.emptyMessage);
                 return;
             }
-            activeLayerIds.add('pollen');
-            button.classList.add('active-layer');
-            if (heatLayers.pollen && !map.hasLayer(heatLayers.pollen)) {
-                map.addLayer(heatLayers.pollen);
-            }
-            updateVisibleMarkers();
+            activateLayer('pollen');
+            renderLayerUI();
         };
 
         if (needsLoad) {
-            button.classList.add('loading');
-            loadPollenLayer(center, function(hasData) {
-                button.classList.remove('loading');
-                activate(hasData);
-            });
+            loadPollenLayer(center, activate);
         } else {
             activate(pollenState.hasData);
         }
     }
 
-    // Real pollen layer fetches Open-Meteo data lazily for the selected city.
-    var pollenButton = document.getElementById('pollen');
-    if (pollenButton) {
-        pollenButton.addEventListener('click', togglePollen);
+    function resetAirLayersForError(message) {
+        AIR_LAYER_IDS.forEach(function(layerId) {
+            heatLayers[layerId] = null;
+            layerMarkers[layerId] = [];
+            pendingAirLayerIds.delete(layerId);
+            activeLayerIds.delete(layerId);
+            layerStates[layerId] = {
+                status: 'error',
+                count: 0,
+                min: null,
+                max: null,
+                total: null,
+                dominantLabel: null,
+                message: message
+            };
+        });
+        updateVisibleMarkers();
     }
+
+    function applyPendingAirLayers() {
+        var requestedLayerIds = Array.from(pendingAirLayerIds);
+        var lastMessage = null;
+
+        pendingAirLayerIds.clear();
+        requestedLayerIds.forEach(function(layerId) {
+            if (layerStates[layerId] && layerStates[layerId].status === 'ready' && heatLayers[layerId]) {
+                activateLayer(layerId);
+            } else {
+                lastMessage = LAYER_CONFIG[layerId].emptyMessage;
+            }
+        });
+
+        renderLayerUI(lastMessage);
+    }
+
+    function buildAirQualityLayers(data) {
+        var heatDataByLayer = {};
+        var markersByLayer = {};
+        var statsByLayer = {};
+
+        AIR_LAYER_IDS.forEach(function(layerId) {
+            heatDataByLayer[layerId] = [];
+            markersByLayer[layerId] = [];
+            statsByLayer[layerId] = { count: 0, min: null, max: null };
+        });
+
+        data.forEach(function(stazione) {
+            var position = stationLatLng(stazione);
+            if (!position) {
+                return;
+            }
+
+            var marker = L.marker([position.lat, position.lng]).bindPopup(buildStationPopup(stazione));
+            marker._pathplannerStationCode = stazione.cod || (position.lat + ',' + position.lng);
+            allStationMarkers[marker._pathplannerStationCode] = marker;
+
+            AIR_LAYER_IDS.forEach(function(layerId) {
+                var value = readMeasurement(stazione, layerId);
+                if (value === null) {
+                    return;
+                }
+
+                var intensity = normalizeToUnit(value, LAYER_CONFIG[layerId].referenceMax, 0.06);
+                heatDataByLayer[layerId].push([position.lat, position.lng, intensity]);
+                Array.prototype.push.apply(
+                    heatDataByLayer[layerId],
+                    buildStationSpread(position.lat, position.lng, intensity)
+                );
+                markersByLayer[layerId].push(marker);
+                recordStats(statsByLayer[layerId], value);
+            });
+        });
+
+        AIR_LAYER_IDS.forEach(function(layerId) {
+            var stats = statsByLayer[layerId];
+            layerMarkers[layerId] = markersByLayer[layerId];
+
+            if (heatDataByLayer[layerId].length) {
+                heatLayers[layerId] = L.heatLayer(heatDataByLayer[layerId], baseHeatOptions);
+                layerStates[layerId] = {
+                    status: 'ready',
+                    count: stats.count,
+                    min: stats.min,
+                    max: stats.max,
+                    total: null,
+                    dominantLabel: null,
+                    message: ''
+                };
+            } else {
+                heatLayers[layerId] = null;
+                layerStates[layerId] = {
+                    status: 'empty',
+                    count: 0,
+                    min: null,
+                    max: null,
+                    total: null,
+                    dominantLabel: null,
+                    message: LAYER_CONFIG[layerId].emptyMessage
+                };
+            }
+        });
+    }
+
+    // Register all toggles before any API returns so chips never go dead.
+    ALL_LAYER_IDS.forEach(registerLayerButton);
+    renderLayerUI();
 
     // When the selected city changes, refresh an active pollen layer to match it.
     var pollenStartInput = document.getElementById('startPoint');
@@ -299,85 +800,48 @@ document.addEventListener("DOMContentLoaded", function() {
                 return;
             }
             removePollenLayer();
+            layerStates.pollen.status = 'loading';
+            renderLayerUI('Refreshing pollen forecast for the selected start point...');
             loadPollenLayer(center, function(hasData) {
-                var button = document.getElementById('pollen');
                 if (hasData) {
-                    if (heatLayers.pollen && !map.hasLayer(heatLayers.pollen)) {
-                        map.addLayer(heatLayers.pollen);
-                    }
+                    activateLayer('pollen');
                 } else {
                     activeLayerIds.delete('pollen');
-                    if (button) {
-                        button.classList.remove('active-layer');
-                    }
+                    updateVisibleMarkers();
                 }
-                updateVisibleMarkers();
+                renderLayerUI(hasData ? null : layerStates.pollen.message);
             });
         });
     }
 
     // Fetch real station data and build pollutant heatmaps.
     fetch('/api/stazioni_dati/')
-        .then(function(response) { return response.json(); })
+        .then(function(response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.json();
+        })
         .then(function(data) {
-            var pm10HeatData = [];
-            var pm25HeatData = [];
-            var no2HeatData = [];
-            var o3HeatData = [];
+            if (!Array.isArray(data)) {
+                throw new Error('Unexpected station payload');
+            }
 
-            var pm10Markers = [];
-            var pm25Markers = [];
-            var no2Markers = [];
-            var o3Markers = [];
+            stationDataState.loading = false;
+            stationDataState.loaded = true;
+            stationDataState.error = null;
+            stationDataState.stationCount = data.length;
 
-            data.forEach(function(stazione) {
-                var marker = L.marker([stazione.lat, stazione.lng]);
-                var popupContent =
-                    '<b>' + stazione.nome + ' (' + stazione.cod + ')</b><br>' +
-                    stazione.ind + '<br>' + stazione.com + ', ' + stazione.prov + '<hr>' +
-                    '<strong>PM10</strong>: ' + (stazione.pm10 !== null ? stazione.pm10 + ' µg/m³' : 'N/A') + '<hr>' +
-                    '<strong>PM2.5</strong>: ' + (stazione.pm25 !== null ? stazione.pm25 + ' µg/m³' : 'N/A') + '<hr>' +
-                    '<strong>NO2</strong>: ' + (stazione.no2 !== null ? stazione.no2 + ' µg/m³' : 'N/A') + '<hr>' +
-                    '<strong>O3</strong>: ' + (stazione.o3 !== null ? stazione.o3 + ' µg/m³' : 'N/A');
-                marker.bindPopup(popupContent);
-
-                allStationMarkers[stazione.cod] = marker;
-
-                if (stazione.pm10 !== null) {
-                    pm10HeatData.push([stazione.lat, stazione.lng, stazione.pm10]);
-                    pm10HeatData = pm10HeatData.concat(generateDummyPoints(stazione.lat, stazione.lng, stazione.pm10, 200, 1000));
-                    pm10Markers.push(marker);
-                }
-                if (stazione.pm25 !== null) {
-                    pm25HeatData.push([stazione.lat, stazione.lng, stazione.pm25]);
-                    pm25HeatData = pm25HeatData.concat(generateDummyPoints(stazione.lat, stazione.lng, stazione.pm25, 200, 1000));
-                    pm25Markers.push(marker);
-                }
-                if (stazione.no2 !== null) {
-                    no2HeatData.push([stazione.lat, stazione.lng, stazione.no2]);
-                    no2HeatData = no2HeatData.concat(generateDummyPoints(stazione.lat, stazione.lng, stazione.no2, 200, 1000));
-                    no2Markers.push(marker);
-                }
-                if (stazione.o3 !== null) {
-                    o3HeatData.push([stazione.lat, stazione.lng, stazione.o3]);
-                    o3HeatData = o3HeatData.concat(generateDummyPoints(stazione.lat, stazione.lng, stazione.o3, 200, 1000));
-                    o3Markers.push(marker);
-                }
-            });
-
-            heatLayers.pm10 = L.heatLayer(pm10HeatData, baseHeatOptions);
-            heatLayers.pm25 = L.heatLayer(pm25HeatData, baseHeatOptions);
-            heatLayers.no2 = L.heatLayer(no2HeatData, baseHeatOptions);
-            heatLayers.o3 = L.heatLayer(o3HeatData, baseHeatOptions);
-
-            layerMarkers.pm10 = pm10Markers;
-            layerMarkers.pm25 = pm25Markers;
-            layerMarkers.no2 = no2Markers;
-            layerMarkers.o3 = o3Markers;
-
-            ['pm10', 'pm25', 'no2', 'o3'].forEach(registerLayerButton);
+            buildAirQualityLayers(data);
+            applyPendingAirLayers();
         })
         .catch(function(error) {
+            var message = 'Air-quality station data could not be loaded.';
+            stationDataState.loading = false;
+            stationDataState.loaded = false;
+            stationDataState.error = error && error.message ? error.message : String(error);
             console.error('[heatmap] Error fetching station data:', error);
+            resetAirLayersForError(message);
+            renderLayerUI(message + ' PM2.5, PM10, NO₂, and O₃ are unavailable; pollen can still be requested.');
         });
 });

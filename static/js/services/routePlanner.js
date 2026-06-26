@@ -80,12 +80,21 @@ function perpDistanceMeters(p, a, b) {
  *     deviation is meaningful (> MIN_VIA_DEVIATION_M); otherwise [start, goal].
  * @param {Array} path - A* grid path nodes
  * @param {Object|null} viaPoint - explicit via (e.g. park) for via-point routes
+ * @param {Object|null} startPoint - the user's real origin A {lat,lon}
+ * @param {Object|null} endPoint - the user's real destination B {lat,lon}
  * @returns {Array<{lat,lon}>}
  */
-function selectMapboxWaypoints(path, viaPoint = null) {
+function selectMapboxWaypoints(path, viaPoint = null, startPoint = null, endPoint = null) {
     if (!path || path.length === 0) return [];
-    const start = toLatLon(path[0]);
-    const goal = toLatLon(path[path.length - 1]);
+    // TODO5-fe: anchor Mapbox routing to the user's EXACT A and B, not the snapped
+    // A* grid nodes (path[0] / path[last]). Mapbox snaps each anchor to the nearest
+    // road, so the displayed polyline now starts at A and ends at B as dropped.
+    const start = startPoint && typeof startPoint.lat === 'number'
+        ? toLatLon(startPoint)
+        : toLatLon(path[0]);
+    const goal = endPoint && typeof endPoint.lat === 'number'
+        ? toLatLon(endPoint)
+        : toLatLon(path[path.length - 1]);
     if (path.length < 3) return [start, goal];
 
     if (viaPoint && typeof viaPoint.lat === 'number' && typeof viaPoint.lon === 'number') {
@@ -105,7 +114,7 @@ function selectMapboxWaypoints(path, viaPoint = null) {
     return apex && maxDev > MIN_VIA_DEVIATION_M ? [start, apex, goal] : [start, goal];
 }
 
-async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, transportMode) {
+async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, transportMode, startPoint = null, endPoint = null) {
     const routes = [];
     for (let i = 0; i < astarRoutes.length; i++) {
         const ar = astarRoutes[i];
@@ -117,7 +126,9 @@ async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, 
         // Hand Mapbox only a few strategic via-points (start + ≤1 via/apex + goal)
         // instead of the full down-sampled grid path, which Mapbox would weave
         // through and balloon to several times the direct distance.
-        const routePoints = selectMapboxWaypoints(path, ar.viaPoint);
+        // TODO5-fe: pass the real A/B so the first/last waypoint is the user's exact
+        // origin/destination rather than the snapped grid node.
+        const routePoints = selectMapboxWaypoints(path, ar.viaPoint, startPoint, endPoint);
         const environmentalData =
             ar.environmentalData && ar.environmentalData.length > 0
                 ? ar.environmentalData
@@ -327,7 +338,9 @@ export async function generateOptimizedRoutes(
                 const routes = await convertAstarRoutesToPlannerFormat(
                     astarRoutes,
                     patientCondition,
-                    transportMode
+                    transportMode,
+                    startPoint,
+                    endPoint
                 );
 
                 if (routes.length > 0) {
@@ -705,8 +718,11 @@ function generateConditionSpecificWaypoints(startPoint, endPoint, patientConditi
  * @returns {Number} Length in meters
  */
 function calculateRouteLength(routePoints) {
-    if (!routePoints || routePoints.length < 2) return 1000; // Default if insufficient points
-    
+    // TODO2: with <2 points there is no geometry to measure. Return 0 (an honest
+    // "unknown") instead of a fabricated 1000 m so the card-render fallback can use
+    // the real Mapbox summary / coordinate length rather than printing a fake 1 km.
+    if (!routePoints || routePoints.length < 2) return 0;
+
     let totalLength = 0;
     for (let i = 1; i < routePoints.length; i++) {
         const prevPoint = routePoints[i - 1];
@@ -1398,6 +1414,11 @@ export function convertToRoutesFormat(optimizedRoutes) {
             transportMode: route.transportMode,
             environmentDataList: route.environmentDataList || [],
             isBest: route.isBest || false,
+            // TODO2: carry the computed A→B length so the route card shows the real
+            // distance instead of the hardcoded 1 km fallback downstream. Without
+            // this the value was silently dropped here and routes.js fell back to a
+            // default until (and only if) Mapbox geometry finalized.
+            length: Number.isFinite(route.length) && route.length > 0 ? route.length : undefined,
             realDataPercentage: route.realDataPercentage || 0,
             originalScore: route.environmentalScore,
             routingEngine: route.routingEngine || 'unknown',

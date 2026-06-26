@@ -559,7 +559,7 @@ function renderRouteDirections(route, container) {
     const title = L.DomUtil.create('div', 'turn-directions-title', heading);
     title.textContent = `Indicazioni - ${routeName}`;
 
-    const distanceSummary = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const distanceSummary = formatDistanceMeters(routeDistanceMeters(route));
     const durationSummary = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
     const summaryValues = [distanceSummary, durationSummary].filter(Boolean);
     if (summaryValues.length > 0) {
@@ -611,7 +611,7 @@ function renderDirectionsSidebar(route) {
     }
 
     const routeName = getRouteDisplayName(route, 0, 'Selected route');
-    const distance = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const distance = formatDistanceMeters(routeDistanceMeters(route));
     const duration = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
 
     if (summary) {
@@ -822,7 +822,7 @@ function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
         badgeEl.title = envBadge.title;
     }
 
-    const distanceSummary = formatDistanceMeters(route?.length || route?.route?.summary?.totalDistance);
+    const distanceSummary = formatDistanceMeters(routeDistanceMeters(route));
     const durationSummary = formatDurationSeconds(route?.duration || route?.route?.summary?.totalTime);
     const summaryValues = [distanceSummary, durationSummary].filter(Boolean);
     if (summaryValues.length > 0) {
@@ -1531,6 +1531,19 @@ function calculateCoordinateLengthMeters(coordinates) {
         totalLength += distanceBetweenLatLngs(coordinates[i - 1], coordinates[i]);
     }
     return totalLength;
+}
+
+// TODO2: resolve the REAL A→B distance for a route, in meters. Prefers the value
+// propagated from the planner / Mapbox summary, and falls back to measuring the
+// route's own geometry. Returns 0 when nothing is measurable so callers can decide
+// how to render — never a hardcoded 1 km.
+function routeDistanceMeters(route) {
+    const direct = Number.parseFloat(route?.length ?? route?.route?.summary?.totalDistance);
+    if (Number.isFinite(direct) && direct > 0) {
+        return direct;
+    }
+    const geometryLength = calculateCoordinateLengthMeters(getNormalizedRouteLatLonCoordinates(route));
+    return Number.isFinite(geometryLength) && geometryLength > 0 ? geometryLength : 0;
 }
 
 function routeLengthForSimilarity(route, coordinates) {
@@ -4369,8 +4382,14 @@ async function routeWithPrecalculatedRoutes(
                 waypoints: waypoints, // These are L.LatLng objects already
                 originalWaypoints: waypoints, // Store L.LatLng waypoints here as well
                 coordinates: route.coordinates || waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng })),
-                length: route.length || 1000,
-                shortestLength: route.shortestLength || route.length || 1000,
+                // TODO2: derive the real A→B length from the planner-propagated value
+                // or the route geometry instead of a hardcoded 1 km. Mapbox later
+                // overwrites this with summary.totalDistance once the street route
+                // finalizes (see applyAcceptedMapboxRoute).
+                length: Number.isFinite(route.length) && route.length > 0
+                    ? route.length
+                    : calculateCoordinateLengthMeters(getNormalizedRouteLatLonCoordinates({ coordinates: route.coordinates, waypoints })),
+                shortestLength: route.shortestLength || route.length || undefined,
                 environmentDataList: environmentDataList, // Add the environmental data
                 // PP-LOAD-PERF: carry the real-data percentage from the A* sampler
                 // so the env-quality badge can honestly distinguish real vs estimate.

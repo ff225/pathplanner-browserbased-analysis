@@ -1,8 +1,8 @@
 const DEFAULT = {
-    nature: 3,
-    entertainment: 3,
-    nightlife: 3,
-    tourism: 3,
+    nature: 4,
+    entertainment: 0,
+    nightlife: 0,
+    tourism: 0,
     hospital: 3
 };
 
@@ -10,6 +10,9 @@ const PREFERENCE_FIELDS = ['nature', 'entertainment', 'nightlife', 'tourism', 'h
 const DEFAULT_SELECTIONS = ['Choose preferences...', 'No saved preferences'];
 
 const LEGACY_PRESETS = {
+    balanced: {
+        ...DEFAULT
+    },
     nature_lover: {
         nature: 10,
         entertainment: 2,

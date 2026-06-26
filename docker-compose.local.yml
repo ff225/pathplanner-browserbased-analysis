@@ -1,0 +1,18 @@
+services:
+  app:
+    env_file:
+      - .env.docker.local
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_SECURE_SSL_REDIRECT: "false"
+      DJANGO_SESSION_COOKIE_SECURE: "false"
+      DJANGO_CSRF_COOKIE_SECURE: "false"
+      MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN:-}
+      OPENAQ_API_KEY: ${OPENAQ_API_KEY:-}
+    ports:
+      - "127.0.0.1:8765:8000"
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+
+  nginx:
+    profiles:
+      - production

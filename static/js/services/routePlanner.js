@@ -67,6 +67,39 @@ function perpDistanceMeters(p, a, b) {
     return Math.abs(px * by - py * bx) / Math.sqrt(len2);
 }
 
+function simplifyStreetGraphWaypoints(path, start, goal, maxWaypoints = 8) {
+    const nodes = path
+        .map(toLatLon)
+        .filter((p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon));
+    if (nodes.length < 3) {
+        return [start, goal];
+    }
+
+    const cumulative = [0];
+    for (let i = 1; i < nodes.length; i++) {
+        cumulative[i] = cumulative[i - 1] + haversineMeters(nodes[i - 1], nodes[i]);
+    }
+    const total = cumulative[cumulative.length - 1];
+    if (!Number.isFinite(total) || total <= 0) {
+        return [start, goal];
+    }
+
+    const interiorCount = Math.max(0, maxWaypoints - 2);
+    const waypoints = [start];
+    for (let i = 1; i <= interiorCount; i++) {
+        const target = (total * i) / (interiorCount + 1);
+        const index = cumulative.findIndex((distance) => distance >= target);
+        if (index <= 0 || index >= nodes.length - 1) continue;
+        const candidate = nodes[index];
+        const previous = waypoints[waypoints.length - 1];
+        if (haversineMeters(previous, candidate) > 80 && haversineMeters(candidate, goal) > 80) {
+            waypoints.push(candidate);
+        }
+    }
+    waypoints.push(goal);
+    return waypoints;
+}
+
 /**
  * Pick a SMALL set of strategic, monotone via-points for Mapbox street routing.
  *
@@ -84,7 +117,7 @@ function perpDistanceMeters(p, a, b) {
  * @param {Object|null} endPoint - the user's real destination B {lat,lon}
  * @returns {Array<{lat,lon}>}
  */
-function selectMapboxWaypoints(path, viaPoint = null, startPoint = null, endPoint = null) {
+function selectMapboxWaypoints(path, viaPoint = null, startPoint = null, endPoint = null, routingBasis = null) {
     if (!path || path.length === 0) return [];
     // TODO5-fe: anchor Mapbox routing to the user's EXACT A and B, not the snapped
     // A* grid nodes (path[0] / path[last]). Mapbox snaps each anchor to the nearest
@@ -96,6 +129,10 @@ function selectMapboxWaypoints(path, viaPoint = null, startPoint = null, endPoin
         ? toLatLon(endPoint)
         : toLatLon(path[path.length - 1]);
     if (path.length < 3) return [start, goal];
+
+    if (routingBasis === 'street_graph') {
+        return simplifyStreetGraphWaypoints(path, start, goal);
+    }
 
     if (viaPoint && typeof viaPoint.lat === 'number' && typeof viaPoint.lon === 'number') {
         return [start, { lat: viaPoint.lat, lon: viaPoint.lon }, goal];
@@ -114,8 +151,17 @@ function selectMapboxWaypoints(path, viaPoint = null, startPoint = null, endPoin
     return apex && maxDev > MIN_VIA_DEVIATION_M ? [start, apex, goal] : [start, goal];
 }
 
+function buildMapboxWaypointSignature(routePoints, precision = 4) {
+    return (Array.isArray(routePoints) ? routePoints : [])
+        .map((point) => toLatLon(point))
+        .filter((point) => point && Number.isFinite(point.lat) && Number.isFinite(point.lon))
+        .map((point) => `${point.lat.toFixed(precision)},${point.lon.toFixed(precision)}`)
+        .join('|');
+}
+
 async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, transportMode, startPoint = null, endPoint = null) {
     const routes = [];
+    const acceptedWaypointSignatures = new Set();
     for (let i = 0; i < astarRoutes.length; i++) {
         const ar = astarRoutes[i];
         const path = ar.route || [];
@@ -128,22 +174,38 @@ async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, 
         // through and balloon to several times the direct distance.
         // TODO5-fe: pass the real A/B so the first/last waypoint is the user's exact
         // origin/destination rather than the snapped grid node.
-        const routePoints = selectMapboxWaypoints(path, ar.viaPoint, startPoint, endPoint);
+        const routePoints = selectMapboxWaypoints(path, ar.viaPoint, startPoint, endPoint, ar.routingBasis);
+        const waypointSignature = buildMapboxWaypointSignature(routePoints);
+        if (waypointSignature && acceptedWaypointSignatures.has(waypointSignature)) {
+            console.info(
+                `[RoutePlanner] Skipping duplicate A* alternative before render; ` +
+                `same Mapbox waypoints as an accepted route (${waypointSignature}).`
+            );
+            continue;
+        }
+        if (waypointSignature) {
+            acceptedWaypointSignatures.add(waypointSignature);
+        }
+
         const environmentalData =
             ar.environmentalData && ar.environmentalData.length > 0
                 ? ar.environmentalData
                 : await collectRealEnvironmentalData(routePoints, patientCondition);
 
         const dataStats = analyzeEnvironmentalData(environmentalData);
-        const environmentalScore = await calculateRouteEnvironmentalScore(
+        const realEnvScore = await calculateRouteEnvironmentalScore(
             environmentalData,
             patientCondition
         );
+        const environmentalScore = Number.isFinite(realEnvScore)
+            ? realEnvScore
+            : ar.environmentalScore;
 
         routes.push({
             name: i === 0 ? 'Environmental A* Route' : `Environmental A* Alternative ${i + 1}`,
             description:
-                `Grid environmental A* (${path.length} search nodes, ${dataStats.realDataPercentage.toFixed(0)}% real data)`,
+                `${ar.routingBasis === 'street_graph' ? 'OSM street-graph' : 'Grid'} environmental A* ` +
+                `(${path.length} search nodes, ${dataStats.realDataPercentage.toFixed(0)}% real data)`,
             waypoints: routePoints.map((p) => L.latLng(p.lat, p.lon)),
             environmentalScore,
             coordinates: routePoints.map((p) => ({ lat: p.lat, lng: p.lon })),
@@ -153,6 +215,7 @@ async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, 
             realDataPercentage: dataStats.realDataPercentage,
             dataSourceInfo: dataStats.sources,
             routingEngine: 'environmental_astar',
+            astarRoutingBasis: ar.routingBasis || 'grid',
             astarInternalCost: ar.environmentalScore,
             astarPathNodeCount: path.length,
             // #4: distinct-alternative marker. Each env-A* alternative is a
@@ -305,21 +368,16 @@ export async function generateOptimizedRoutes(
                         ? window.BENCHMARK_ASTAR_NUM_ROUTES
                         : numRoutes;
 
-                // Option B (hybrid): fire a NON-BLOCKING low-res real-env pre-fetch
-                // that seeds the A* selection-cost tile cache. We do NOT await it —
-                // A* starts immediately and uses marked synthetic wherever the real
-                // seed has not yet resolved. If the APIs are slow/down, behaviour is
-                // identical to before (pure synthetic), so there is no regression.
+                // Real-only routing: seed A* with real /api/environment samples
+                // before path selection. If real samples are slow or unavailable,
+                // A* continues without synthetic environmental values; real POIs
+                // can still influence the route when they are available.
                 EnvironmentalAStar.clearRealEnvTiles();
-                const realEnvPrefetch = prefetchRealEnvForSelection(
+                await prefetchRealEnvForSelection(
                     startPoint,
                     endPoint,
                     patientCondition
                 );
-                // Swallow late rejections so the dangling promise never bubbles.
-                if (realEnvPrefetch && typeof realEnvPrefetch.catch === 'function') {
-                    realEnvPrefetch.catch(() => {});
-                }
 
                 const astarRoutes = await withTimeout(
                     EnvironmentalAStar.generateAlternativeRoutes(
@@ -330,6 +388,7 @@ export async function generateOptimizedRoutes(
                         astarRouteCount,
                         preferences,
                         distanceTolerance,
+                        transportMode,
                     ),
                     astarMs,
                     'Environmental A*'
@@ -825,8 +884,7 @@ function parseApiEnvironmentPoint(point) {
     const no2 = realValue('nitrogen_dioxide');
 
     // Map a real air-quality reading onto the app-wide 1-10 AQI scale used by the
-    // A* cost function and the synthetic fallback (default 5 = moderate). The
-    // European AQI is 0-100+, so /10 keeps the cost-function thresholds aligned.
+    // A* cost function. The European AQI is 0-100+, so /10 keeps thresholds aligned.
     let airQuality = null;
     if (europeanAqi !== null) {
         airQuality = clamp(europeanAqi / 10, 1, 10);
@@ -867,21 +925,21 @@ function parseApiEnvironmentPoint(point) {
 }
 
 /**
- * NON-BLOCKING low-res pre-fetch of REAL environmental data over a coarse grid
- * around the route bbox (Option B — hybrid). Each grid point is resolved with a
+ * Low-res pre-fetch of REAL environmental data over a coarse grid
+ * around the route bbox. Each grid point is resolved with a
  * single fast call to the Django /api/environment endpoint (real Open-Meteo air
  * quality, warm ~3ms / cold ~2s) instead of the slow multi-API browser-side
  * getEnvironmentalData that timed out under the old 2.5s race and left the real
  * seed empty in a live run. Every resolved REAL point (isSynthetic:false) is
  * streamed into the A* real-tile seed so the SELECTED path is guided by real
- * pollution where available. A* is NEVER awaited on this: if a point has not
- * resolved by the time A* evaluates a node, the cost uses marked synthetic.
+ * pollution where available. Missing values stay unavailable; no synthetic
+ * environmental values are generated.
  * Keeps the 4-parallel pool + per-request timeout. Non-real responses are
  * rejected at the seam (HARD RULE: never seed synthetic as real).
- * @returns {Promise} resolves when the coarse grid finishes (telemetry only;
- *                    callers MUST NOT await it before running A*).
+ * @returns {Promise} resolves when the coarse grid finishes or the real-data
+ *                    deadline is reached.
  */
-const SEED_CONSUME_DEADLINE_MS = 800;
+const SEED_CONSUME_DEADLINE_MS = 8000;
 
 function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
     const grid = buildCoarseEnvGrid(startPoint, endPoint, 3);
@@ -965,12 +1023,8 @@ function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
             return 'grid-error';
         });
 
-    // Hardening: bound the seed-consumption with a deterministic ~800ms deadline so
-    // the RETURNED promise settles predictably even on a slow network. The deadline
-    // RESOLVES (never rejects) so it adds no dangling rejection. The grid workers
-    // keep streaming real points into the A* seed in the background (each keeps its
-    // own per-request timeout), and A* never awaits this promise — so routing is
-    // never blocked and seedRealEnvTiles behaviour is unchanged (no regression).
+    // Bound the real-data seed step. After this deadline A* proceeds with
+    // whichever real samples arrived; missing samples stay unavailable.
     const deadline = new Promise((resolve) =>
         setTimeout(() => resolve('deadline'), SEED_CONSUME_DEADLINE_MS)
     );
@@ -979,7 +1033,7 @@ function prefetchRealEnvForSelection(startPoint, endPoint, patientCondition) {
         if (settledBy === 'deadline') {
             console.log(
                 `[prefetchRealEnv] seed-consume checkpoint at ${SEED_CONSUME_DEADLINE_MS}ms ` +
-                `(grid still streaming in background), seed size=` +
+                `(proceeding with real samples available), seed size=` +
                 `${EnvironmentalAStar.getRealEnvSeedSize()}`
             );
         }
@@ -1028,10 +1082,7 @@ async function collectRealEnvironmentalData(routePoints, patientCondition) {
             console.warn(`[collectRealEnvironmentalData] Error for point ${index}:`, error.message);
         }
 
-        // Fallback to synthetic data if real APIs failed or returned defaults.
-        const syntheticData = createSyntheticEnvData(point, patientCondition);
-        syntheticData.coordinate = { lat, lng: lon };
-        return syntheticData;
+        return null;
     }
 
     // Run API calls with limited concurrency so we don't overwhelm the services
@@ -1052,59 +1103,6 @@ async function collectRealEnvironmentalData(routePoints, patientCondition) {
     console.log(`[collectRealEnvironmentalData] Collected ${environmentalData.length} data points, ${dataStats.realDataPercentage.toFixed(1)}% real data`);
 
     return environmentalData;
-}
-
-/**
- * Create synthetic environmental data for a point
- * @param {Object} point - Point with lat/lon
- * @param {Object} patientCondition - Patient condition
- * @returns {Object} Synthetic environmental data
- */
-function createSyntheticEnvData(point, patientCondition) {
-    const lat = point.lat;
-    const lon = point.lon || point.lng;
-    
-    // Create a deterministic hash of the location
-    const locationHash = Math.abs(Math.sin(lat * 100) * 10000 + Math.cos(lon * 100) * 10000);
-    const hashFactor = (locationHash % 100) / 100; // 0-1 range
-    
-    // Condition-specific adjustments
-    let conditionFactor = 1.0;
-    if (patientCondition && patientCondition.name) {
-        switch(patientCondition.name) {
-            case "respiratory":
-                conditionFactor = 0.8 + (Math.cos(lat * 15) * 0.3);
-                break;
-            case "cardiac":
-                conditionFactor = 0.9 + (Math.sin(lon * 12) * 0.2);
-                break;
-            case "mobility":
-                conditionFactor = 0.7 + (Math.sin(lat * 8) * 0.2);
-                break;
-            default:
-                conditionFactor = 1.0;
-        }
-    }
-    
-    // Generate synthetic values
-    return {
-        temperature: 20 + (Math.sin(lat * 8) * 5 * hashFactor),
-        humidity: 50 + (Math.cos(lon * 5) * 15 * hashFactor),
-        airQuality: Math.max(1, Math.min(10, 5 * hashFactor * conditionFactor)),
-        weather: ["Clear", "Partly Cloudy", "Cloudy", "Light Rain"][Math.floor(lat * 10) % 4],
-        slope: Math.abs(2 * Math.sin(lat * 20) * hashFactor * conditionFactor),
-        noise: Math.max(1, Math.min(10, 3 * hashFactor)),
-        timestamp: Date.now(),
-        isDefault: true,
-        isSynthetic: true,
-        coordinate: { lat, lng: lon },
-        sources: {
-            temperature: 'Synthetic',
-            airQuality: 'Synthetic',
-            slope: 'Synthetic',
-            noise: 'Synthetic'
-        }
-    };
 }
 
 /**
@@ -1227,73 +1225,46 @@ function analyzeEnvironmentalData(environmentalData) {
  */
 async function calculateRouteEnvironmentalScore(environmentalData, patientCondition) {
     if (!environmentalData || environmentalData.length === 0) {
-        return 250; // Default score
+        return null;
     }
-    
+
+    const realData = environmentalData.filter(data => data && !data.isDefault && !data.isSynthetic);
+    if (realData.length === 0) {
+        return null;
+    }
+
     let totalScore = 0;
-    let realDataPoints = 0;
-    let syntheticDataPoints = 0;
-    
-    // Create a unique multiplier for each route to ensure more distinct scores
-    // Generate a value based on the first and last coordinates
-    const firstPoint = environmentalData[0]?.coordinate;
-    const lastPoint = environmentalData[environmentalData.length - 1]?.coordinate;
-    let routeUniqueMultiplier = 1.0;
-    
-    if (firstPoint && lastPoint) {
-        // Generate a deterministic value based on route coordinates
-        const routeHashValue = Math.abs(
-            Math.sin(firstPoint.lat * 100) * 10000 + 
-            Math.cos(firstPoint.lng * 100) * 10000 +
-            Math.tan(lastPoint.lat * 100) * 10000 + 
-            Math.sin(lastPoint.lng * 100) * 10000
-        );
-        
-        // Create a multiplier between 0.85 and 1.15 to create a subtle but real difference
-        routeUniqueMultiplier = 0.85 + ((routeHashValue % 30) / 100);
-    }
-    
-    console.log(`[calculateRouteEnvironmentalScore] Route unique multiplier: ${routeUniqueMultiplier.toFixed(3)}`);
-    
-    // Calculate weighted score based on patient condition
-    for (const data of environmentalData) {
-        // Use the calculateEnvironmentalCost function from the A* algorithm
-        // This ensures consistent scoring between route generation and evaluation
-        const pointScore = await EnvironmentalAStar.calculateEnvironmentalCost(
-            { lat: data.coordinate.lat, lon: data.coordinate.lng }, 
-            patientCondition
-        );
-        
-        // Apply the route-specific multiplier to create more distinct scores
-        const adjustedScore = pointScore * routeUniqueMultiplier;
-        
-        totalScore += adjustedScore;
-        
-        // Track real vs synthetic data points
-        if (data.isDefault || data.isSynthetic) {
-            syntheticDataPoints++;
-        } else {
-            realDataPoints++;
+
+    for (const data of realData) {
+        let pointScore = 0;
+        const airQualityMultiplier = patientCondition?.airQualitySensitivity || 1;
+        const slopeMultiplier = patientCondition?.slopeSensitivity || 1;
+        const noiseMultiplier = patientCondition?.noiseSensitivity || 1;
+        const temperatureMultiplier = patientCondition?.temperatureSensitivity || 1;
+        const humidityMultiplier = patientCondition?.humiditySensitivity || 1;
+
+        if (data.airQuality !== null && data.airQuality !== undefined) {
+            pointScore += Math.pow(Math.max(0, data.airQuality - 4), 2) * airQualityMultiplier;
         }
+        if (data.slope !== null && data.slope !== undefined) {
+            pointScore += Math.pow(Math.abs(data.slope), 2) * slopeMultiplier / 5;
+        }
+        if (data.noise !== null && data.noise !== undefined) {
+            pointScore += Math.max(0, data.noise - 3) * noiseMultiplier;
+        }
+        if (data.temperature !== null && data.temperature !== undefined) {
+            pointScore += Math.abs(data.temperature - 22) * temperatureMultiplier / 3;
+        }
+        if (data.humidity !== null && data.humidity !== undefined) {
+            pointScore += Math.abs(data.humidity - 50) * humidityMultiplier / 10;
+        }
+
+        totalScore += pointScore;
     }
-    
-    // Calculate average score
-    const avgScore = totalScore / environmentalData.length;
-    
-    // Apply an additional multiplier based on the percentage of real data
-    // Routes with more real data should get a slight bonus
-    const realDataPercentage = environmentalData.length > 0 ? 
-        (realDataPoints / environmentalData.length) : 0;
-    
-    // Lower score by up to 10% for routes with more real data
-    const realDataBonus = 1.0 - (realDataPercentage * 0.1);
-    
-    // Final score with real data bonus
-    const finalScore = avgScore * realDataBonus;
-    
-    console.log(`[calculateRouteEnvironmentalScore] Raw score: ${avgScore.toFixed(2)}, Real data: ${(realDataPercentage*100).toFixed(1)}%, Final score: ${finalScore.toFixed(2)}`);
-    
-    return finalScore;
+
+    const avgScore = totalScore / realData.length;
+    console.log(`[calculateRouteEnvironmentalScore] Real-only route score: ${avgScore.toFixed(2)} from ${realData.length} point(s)`);
+    return avgScore;
 }
 
 /**

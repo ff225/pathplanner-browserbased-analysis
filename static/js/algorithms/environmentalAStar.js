@@ -10,7 +10,6 @@ import * as Environmental from '../services/environmental.js';
 import * as AirQuality from '../services/airQuality.js';
 import * as Weather from '../services/weather.js';
 import * as Elevation from '../services/elevation.js';
-import { lookupEnv } from '../data/envTileIndex.js';
 import { fetchPoisForBounds } from '../services/poisAlongRoute.js';
 
 const POI_CATEGORY_TAGS = {
@@ -26,21 +25,22 @@ const POI_CATEGORY_TAGS = {
 // fetched through the proxy below so real parks/hospitals reach the A* cost even
 // when a direct browser→Overpass call is blocked (CORS) or down. Categories not
 // listed here still query Overpass directly.
-const BACKEND_POI_CATEGORY = { nature: 'parks', hospital: 'hospitals' };
-
-// Lightweight, deterministic synthetic environmental data used during A* search.
-// We intentionally avoid live API calls per grid node because they make long routes
-// unbearably slow; the real environmental profile is computed later for the final route.
-const astarEnvCache = new Map();
+const BACKEND_POI_CATEGORY = {
+    nature: 'parks',
+    hospital: 'hospitals',
+    entertainment: 'entertainment',
+    nightlife: 'nightlife',
+    tourism: 'tourism'
+};
 
 // ---------------------------------------------------------------------------
-// Real environmental tile seed (Option B — hybrid, non-blocking).
-// A low-res pre-fetch of REAL /api/environment data (fired from routePlanner
-// BEFORE A* and NEVER awaited) streams resolved real points into this seed.
+// Real environmental tile seed.
+// A low-res pre-fetch of REAL /api/environment data (awaited up to a bounded
+// deadline before A*) streams resolved real points into this seed.
 // The A* cost function reads it as its TOP-priority environmental source, so
-// the SELECTED path is guided by real pollution/noise where available. If the
-// pre-fetch has not resolved for a given area, the cost falls back to the
-// marked synthetic model — A* never blocks waiting for real data.
+// the SELECTED path is guided by real pollution where available. If the
+// pre-fetch has not resolved for a given area, that factor is skipped rather
+// than replaced with synthetic data.
 // HARD RULE: every point stored here is REAL (isSynthetic:false / isDefault:false);
 // synthetic points are rejected at the seam.
 // ---------------------------------------------------------------------------
@@ -49,8 +49,8 @@ const realEnvSeed = {
     maxRadiusM: 1200,
 };
 
-// Per-route cost-source telemetry — lets us PROVE the selected path consumed
-// real env from the seed (vs synthetic fallback). Reset at each findOptimalRoute.
+// Per-route cost-source telemetry — lets us prove how much of the selected path
+// consumed real env from the seed. Reset at each findOptimalRoute.
 let envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
 
 // ---------------------------------------------------------------------------
@@ -163,59 +163,10 @@ function logEnvCostStats() {
     console.log(
         `[A* env-cost] real-seed hits: ${s.realSeedHits} (isSynthetic:false), ` +
         `static-tile: ${s.staticTileHits}, supplied: ${s.suppliedHits}, ` +
-        `synthetic fallback: ${s.syntheticHits} (isSynthetic:true) | ` +
+        `missing real env: ${s.syntheticHits} (no synthetic fallback) | ` +
         `real share of selection cost ≈ ${pct}% over ${total} node evals ` +
         `| seed size=${realEnvSeed.points.length}`
     );
-}
-
-function deterministicLocationFactor(lat, lon) {
-    const value = Math.abs(Math.sin(lat * 1000) * 10000 + Math.cos(lon * 1000) * 10000);
-    return (value % 1000) / 1000;
-}
-
-function createFastEnvironmentalData(lat, lon, patientCondition) {
-    const hash = deterministicLocationFactor(lat, lon);
-    const baseData = {
-        temperature: 18 + hash * 14,           // 18-32°C
-        humidity: 35 + hash * 40,              // 35-75%
-        airQuality: 1 + hash * 9,              // 1-10 AQI
-        slope: hash * 10,                      // 0-10%
-        noise: 1 + hash * 9,                   // 1-10 noise level
-        trafficDensity: hash * 0.8,            // 0-0.8
-        greenVisibility: hash * 0.8,           // 0-0.8
-        surfaceQuality: hash * 0.5,            // 0-0.5
-        emergencyAccessibility: 1 + hash * 9,  // 1-10
-        sensoryLoad: 1 + hash * 9,             // 1-10
-        weather: hash < 0.7 ? 'Clear' : 'Cloudy',
-        isDefault: true,
-        isSynthetic: true
-    };
-
-    // Blend in known condition-specific hotspots so the A* still reacts to real
-    // problem areas (e.g., high traffic near a known bad air-quality region).
-    if (patientCondition && patientCondition.name && patientCondition.name !== 'default') {
-        const factor = patientCondition.name.toLowerCase();
-        if (factor === 'respiratory') {
-            baseData.airQuality = Math.min(10, baseData.airQuality + baseData.trafficDensity * 2);
-        } else if (factor === 'cardiac' || factor === 'mobility') {
-            baseData.slope = Math.min(15, baseData.slope * (1 + hash));
-        } else if (factor === 'mental') {
-            baseData.noise = Math.min(10, baseData.noise + baseData.trafficDensity * 2);
-        }
-    }
-
-    return baseData;
-}
-
-function getFastEnvironmentalData(lat, lon, patientCondition) {
-    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
-    let data = astarEnvCache.get(key);
-    if (!data) {
-        data = createFastEnvironmentalData(lat, lon, patientCondition);
-        astarEnvCache.set(key, data);
-    }
-    return data;
 }
 
 function getRouteBbox(start, goal) {
@@ -225,6 +176,266 @@ function getRouteBbox(start, goal) {
         maxLat: Math.max(start.lat, goal.lat) + pad,
         minLon: Math.min(start.lon, goal.lon) - pad,
         maxLon: Math.max(start.lon, goal.lon) + pad
+    };
+}
+
+function normalizeStreetGraphMode(transportMode) {
+    if (transportMode === 'driving' || transportMode === 'car') return 'car';
+    if (transportMode === 'cycling') return 'cycling';
+    return 'walking';
+}
+
+async function fetchStreetGraphForBounds(bbox, transportMode = 'walking') {
+    if (!window._astarStreetGraphCache) {
+        window._astarStreetGraphCache = {};
+    }
+
+    const mode = normalizeStreetGraphMode(transportMode);
+    const cacheKey = `${mode}:${bbox.minLat.toFixed(5)},${bbox.minLon.toFixed(5)},${bbox.maxLat.toFixed(5)},${bbox.maxLon.toFixed(5)}`;
+    if (window._astarStreetGraphCache[cacheKey]) {
+        return window._astarStreetGraphCache[cacheKey];
+    }
+
+    const params = new URLSearchParams({
+        mode,
+        min_lat: bbox.minLat,
+        min_lon: bbox.minLon,
+        max_lat: bbox.maxLat,
+        max_lon: bbox.maxLon
+    });
+
+    const response = await fetch(`/api/street_graph?${params.toString()}`);
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `street graph lookup failed (${response.status})`);
+    }
+
+    const payload = await response.json();
+    const graph = buildStreetGraph(payload);
+    window._astarStreetGraphCache[cacheKey] = graph;
+    return graph;
+}
+
+function buildStreetGraph(payload) {
+    const nodeMap = new Map();
+    const adjacency = new Map();
+    const rawNodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
+    const rawWays = Array.isArray(payload?.ways) ? payload.ways : [];
+    const graphMode = payload?.mode || 'walking';
+
+    for (const raw of rawNodes) {
+        const id = String(raw.id);
+        const lat = Number(raw.lat);
+        const lon = Number(raw.lon);
+        if (!id || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const node = { lat, lon, _streetId: id };
+        nodeMap.set(id, node);
+        adjacency.set(id, []);
+    }
+
+    for (const way of rawWays) {
+        const refs = Array.isArray(way.nodes) ? way.nodes.map(String) : [];
+        for (let i = 0; i < refs.length - 1; i++) {
+            const a = nodeMap.get(refs[i]);
+            const b = nodeMap.get(refs[i + 1]);
+            if (!a || !b) continue;
+            const distance = calculateDistance(a, b);
+            if (!Number.isFinite(distance) || distance <= 0) continue;
+            adjacency.get(a._streetId).push({
+                node: b,
+                distance,
+                wayId: way.id,
+                highway: way.highway,
+                name: way.name
+            });
+
+            const oneway = String(way.oneway || '').toLowerCase();
+            const respectOneway = graphMode === 'car';
+            if (!respectOneway || (oneway !== 'yes' && oneway !== '1' && oneway !== 'true')) {
+                adjacency.get(b._streetId).push({
+                    node: a,
+                    distance,
+                    wayId: way.id,
+                    highway: way.highway,
+                    name: way.name
+                });
+            }
+        }
+    }
+
+    const nodes = [...nodeMap.values()];
+    const edgeCount = [...adjacency.values()].reduce((sum, edges) => sum + edges.length, 0);
+    if (nodes.length < 2 || edgeCount === 0) {
+        throw new Error('street graph has no connected road edges');
+    }
+
+    return {
+        nodes,
+        nodeMap,
+        adjacency,
+        mode: graphMode,
+        source: payload?.source || 'OpenStreetMap-Overpass',
+        count: payload?.count || { nodes: nodes.length, edges: edgeCount }
+    };
+}
+
+function nearestStreetNode(point, nodes) {
+    let nearest = null;
+    let nearestDistance = Infinity;
+    for (const node of nodes) {
+        const distance = calculateDistance(point, node);
+        if (distance < nearestDistance) {
+            nearest = node;
+            nearestDistance = distance;
+        }
+    }
+    return { node: nearest, distance: nearestDistance };
+}
+
+function nearestStreetNodes(point, nodes, maxCount = 8, maxSnapMeters = 1200) {
+    return nodes
+        .map(node => ({ node, distance: calculateDistance(point, node) }))
+        .filter(candidate => Number.isFinite(candidate.distance))
+        .sort((a, b) => a.distance - b.distance)
+        .filter(candidate => candidate.distance <= maxSnapMeters)
+        .slice(0, maxCount);
+}
+
+function computeStreetGraphComponents(adjacency) {
+    const componentByNode = new Map();
+    const componentSizes = new Map();
+    let componentId = 0;
+
+    for (const nodeId of adjacency.keys()) {
+        if (componentByNode.has(nodeId)) continue;
+
+        const stack = [nodeId];
+        componentByNode.set(nodeId, componentId);
+        let size = 0;
+
+        while (stack.length > 0) {
+            const currentId = stack.pop();
+            size++;
+            for (const edge of adjacency.get(currentId) || []) {
+                const nextId = edge.node?._streetId;
+                if (!nextId || componentByNode.has(nextId)) continue;
+                componentByNode.set(nextId, componentId);
+                stack.push(nextId);
+            }
+        }
+
+        componentSizes.set(componentId, size);
+        componentId++;
+    }
+
+    return { componentByNode, componentSizes };
+}
+
+function selectSharedComponentEndpointSnaps(start, goal, graphNodes, adjacency) {
+    const { componentByNode, componentSizes } = computeStreetGraphComponents(adjacency);
+    const startCandidates = nearestStreetNodes(start, graphNodes, 32, 2000);
+    const goalCandidates = nearestStreetNodes(goal, graphNodes, 32, 2000);
+    let best = null;
+
+    for (const s of startCandidates) {
+        const sComponent = componentByNode.get(s.node._streetId);
+        if (sComponent == null) continue;
+        for (const g of goalCandidates) {
+            const gComponent = componentByNode.get(g.node._streetId);
+            if (sComponent !== gComponent) continue;
+            const size = componentSizes.get(sComponent) || 0;
+            const score = s.distance + g.distance - Math.min(size, 20000) / 100;
+            if (!best || score < best.score) {
+                best = { componentId: sComponent, score };
+            }
+        }
+    }
+
+    if (!best) {
+        return null;
+    }
+
+    const inComponent = candidate => componentByNode.get(candidate.node._streetId) === best.componentId;
+    return {
+        componentId: best.componentId,
+        startSnaps: startCandidates.filter(inComponent).slice(0, 8),
+        goalSnaps: goalCandidates.filter(inComponent).slice(0, 8)
+    };
+}
+
+function cloneStreetAdjacency(adjacency) {
+    const copy = new Map();
+    for (const [id, edges] of adjacency.entries()) {
+        copy.set(id, edges.slice());
+    }
+    return copy;
+}
+
+function connectEndpoint(adjacency, nodeMap, endpoint, id, graphNodes, maxSnapMeters = 1200, preferredSnaps = null) {
+    const snaps = preferredSnaps?.length
+        ? preferredSnaps
+        : nearestStreetNodes(endpoint, graphNodes, 8, maxSnapMeters);
+    if (snaps.length === 0) {
+        throw new Error(`no real street node within ${maxSnapMeters}m of endpoint`);
+    }
+
+    const endpointNode = { lat: endpoint.lat, lon: endpoint.lon, _streetId: id };
+    nodeMap.set(id, endpointNode);
+    adjacency.set(id, snaps.map(snap => ({
+        node: snap.node,
+        distance: snap.distance,
+        wayId: 'endpoint',
+        highway: 'endpoint'
+    })));
+    for (const snap of snaps) {
+        if (!adjacency.has(snap.node._streetId)) {
+            adjacency.set(snap.node._streetId, []);
+        }
+        adjacency.get(snap.node._streetId).push({
+            node: endpointNode,
+            distance: snap.distance,
+            wayId: 'endpoint',
+            highway: 'endpoint'
+        });
+    }
+    return endpointNode;
+}
+
+function instantiateStreetGraphWithEndpoints(streetGraph, start, goal) {
+    const adjacency = cloneStreetAdjacency(streetGraph.adjacency);
+    const nodeMap = new Map(streetGraph.nodeMap);
+    const graphNodes = streetGraph.nodes;
+    const sharedSnaps = selectSharedComponentEndpointSnaps(start, goal, graphNodes, adjacency);
+    if (sharedSnaps) {
+        console.log(
+            `[street-graph] Anchoring endpoints to shared component ${sharedSnaps.componentId} ` +
+            `(${sharedSnaps.startSnaps.length} start snap(s), ${sharedSnaps.goalSnaps.length} goal snap(s))`
+        );
+    }
+    const startNode = connectEndpoint(
+        adjacency,
+        nodeMap,
+        start,
+        '__start__',
+        graphNodes,
+        1200,
+        sharedSnaps?.startSnaps
+    );
+    const goalNode = connectEndpoint(
+        adjacency,
+        nodeMap,
+        goal,
+        '__goal__',
+        graphNodes,
+        1200,
+        sharedSnaps?.goalSnaps
+    );
+    return {
+        nodes: [...graphNodes, startNode, goalNode],
+        nodeMap,
+        adjacency,
+        startNode,
+        goalNode
     };
 }
 
@@ -247,7 +458,7 @@ async function fetchPoiLocations(bbox, category) {
         const realPois = await fetchPoisForBounds(
             backendCategory,
             { minLat: bbox.minLat, minLon: bbox.minLon, maxLat: bbox.maxLat, maxLon: bbox.maxLon },
-            { timeoutMs: 4000 }
+            { timeoutMs: 12000 }
         );
         const pois = realPois
             .map(p => ({ lat: Number(p.lat), lon: Number(p.lon) }))
@@ -296,6 +507,25 @@ async function fetchPoiLocations(bbox, category) {
         window._astarPoiCache[cacheKey] = [];
         return [];
     }
+}
+
+async function fetchPoiLocationsWithBudget(bbox, category, budgetMs = 30000) {
+    let timedOut = false;
+    const fetchPromise = fetchPoiLocations(bbox, category)
+        .catch(error => {
+            console.warn(`POI fetch for ${category} failed, continuing without POIs:`, error.message);
+            return [];
+        });
+
+    return Promise.race([
+        fetchPromise.then(pois => (timedOut ? [] : pois)),
+        new Promise(resolve => {
+            setTimeout(() => {
+                timedOut = true;
+                resolve([]);
+            }, budgetMs);
+        })
+    ]);
 }
 
 function nearestPoiDistance(point, poiList) {
@@ -361,9 +591,24 @@ function precomputePoiDistances(grid, poiLists) {
     return poiDistances;
 }
 
-function applyPreferencePoiAdjustment(cost, weight, nearestDistanceMeters) {
+function isRealEnvironmentData(data) {
+    return data && data.isDefault !== true && data.isSynthetic !== true;
+}
+
+function applyPreferencePoiAdjustment(cost, weight, nearestDistanceMeters, category) {
     if (weight && typeof weight === 'number' && Number.isFinite(nearestDistanceMeters)) {
-        cost += -weight * 5.0 * Math.exp(-nearestDistanceMeters / 200.0);
+        const targetRadiusM = category === 'nature' || category === 'tourism' ? 900 : 650;
+        const normalizedDistance = Math.min(1, Math.max(0, nearestDistanceMeters / targetRadiusM));
+        const toleranceScale = category === 'nature' || category === 'tourism'
+            ? toleranceGreenScale()
+            : 1;
+        if (weight > 0) {
+            // Positive preference: being far from the preferred POI is worse.
+            cost += weight * 8.0 * normalizedDistance * toleranceScale;
+        } else {
+            // Negative preference: being close to the unwanted POI is worse.
+            cost += Math.abs(weight) * 8.0 * (1 - normalizedDistance) * toleranceScale;
+        }
     }
     return cost;
 }
@@ -389,13 +634,6 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
 
     // Reset per-route cost-source telemetry (real-seed vs synthetic accounting).
     envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
-
-    // Reset the synthetic cache so each route calculation uses data consistent
-    // with the current patient condition, then pre-compute for every grid node.
-    astarEnvCache.clear();
-    for (const node of grid) {
-        getFastEnvironmentalData(node.lat, node.lon, patientCondition);
-    }
 
     // Precompute nearest-POI distances for all grid nodes once
     const poiDistances = poiLists ? precomputePoiDistances(grid, poiLists) : null;
@@ -485,6 +723,82 @@ export async function findOptimalRoute(start, goal, map, patientCondition, envir
         route: forceExactEndpoints(bestRoute || [start, goal], start, goal),
         environmentalScore: bestEnvironmentalScore
     };
+}
+
+export async function findOptimalRouteOnStreetGraph(start, goal, streetGraph, patientCondition, environmentalData = null, preferences = null, poiLists = null) {
+    console.log("Starting Environmental A* on real OSM street graph");
+    console.log(`Start: (${start.lat}, ${start.lon}), Goal: (${goal.lat}, ${goal.lon})`);
+    console.log(`Street graph: ${streetGraph.nodes.length} OSM nodes`);
+
+    const graph = instantiateStreetGraphWithEndpoints(streetGraph, start, goal);
+    envCostStats = { realSeedHits: 0, staticTileHits: 0, suppliedHits: 0, syntheticHits: 0 };
+
+    const poiDistances = poiLists ? precomputePoiDistances(graph.nodes, poiLists) : null;
+    const openSet = new PriorityQueue();
+    const closedSet = new Set();
+    const gScore = {};
+    const fScore = {};
+    const cameFrom = {};
+
+    const startNodeId = nodeToId(graph.startNode);
+    const goalNodeId = graph.goalNode._streetId;
+    gScore[startNodeId] = 0;
+    fScore[startNodeId] = estimateHeuristic(graph.startNode, graph.goalNode, patientCondition);
+    openSet.enqueue(graph.startNode, fScore[startNodeId]);
+
+    while (!openSet.isEmpty()) {
+        const current = openSet.dequeue();
+        const currentId = nodeToId(current);
+
+        if (current._streetId === goalNodeId) {
+            const route = forceExactEndpoints(reconstructPath(cameFrom, current), start, goal);
+            console.log(`Street-graph goal reached! Path found with ${route.length} OSM nodes`);
+            logEnvCostStats();
+            return {
+                route,
+                environmentalScore: gScore[currentId],
+                routingBasis: 'street_graph',
+                streetGraphNodeCount: streetGraph.nodes.length
+            };
+        }
+
+        closedSet.add(currentId);
+        const streetNeighbors = graph.adjacency.get(current._streetId) || [];
+        for (const edge of streetNeighbors) {
+            const neighbor = edge.node;
+            const neighborId = nodeToId(neighbor);
+            if (closedSet.has(neighborId)) continue;
+
+            const tentativeGScore = await calculateCost(
+                current,
+                neighbor,
+                gScore[currentId],
+                patientCondition,
+                environmentalData,
+                preferences,
+                poiLists,
+                poiDistances,
+                edge
+            );
+
+            const neighborInOpenSet = openSet.contains(neighborId);
+            if (!neighborInOpenSet || tentativeGScore < gScore[neighborId]) {
+                cameFrom[neighborId] = current;
+                gScore[neighborId] = tentativeGScore;
+                fScore[neighborId] = tentativeGScore + estimateHeuristic(neighbor, graph.goalNode, patientCondition);
+
+                if (!neighborInOpenSet) {
+                    openSet.enqueue(neighbor, fScore[neighborId]);
+                } else {
+                    openSet.updatePriority(neighborId, fScore[neighborId]);
+                }
+            }
+        }
+    }
+
+    console.warn("No connected OSM street-graph path found for A*");
+    logEnvCostStats();
+    return null;
 }
 
 /**
@@ -602,7 +916,39 @@ function getNeighbors(node, grid, resolution) {
  * @param {Array} environmentalData - Pre-loaded environmental data
  * @returns {Number} Cost value (g-score)
  */
-async function calculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, preferences = null, poiLists = null, poiDistances = null) {
+function calculateStreetEdgePenalty(edgeContext, patientCondition, preferences = null) {
+    if (!edgeContext?.highway || !patientCondition || patientCondition.name === 'default') {
+        return 0;
+    }
+
+    const highway = String(edgeContext.highway);
+    const patientName = patientCondition.name;
+    let penalty = 0;
+
+    if (['motorway', 'trunk', 'primary'].includes(highway)) {
+        penalty += (patientCondition.airQualitySensitivity || 1) * 1.6;
+        penalty += (patientCondition.noiseSensitivity || 1) * 0.9;
+    } else if (['secondary', 'tertiary'].includes(highway)) {
+        penalty += (patientCondition.airQualitySensitivity || 1) * 0.8;
+        penalty += (patientCondition.noiseSensitivity || 1) * 0.4;
+    }
+
+    if (highway === 'steps') {
+        if (patientName === 'mobility') penalty += 80;
+        else if (patientName === 'arthritis') penalty += 55;
+        else if (patientName === 'cardiac') penalty += 35;
+        else if (patientName === 'respiratory') penalty += 20;
+    }
+
+    if (['footway', 'pedestrian', 'path', 'living_street', 'cycleway'].includes(highway)) {
+        const natureWeight = (patientCondition.patientNature || 0) + (preferences?.nature || 0);
+        penalty -= Math.max(0, natureWeight) * 0.35 * toleranceGreenScale();
+    }
+
+    return penalty;
+}
+
+async function calculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, preferences = null, poiLists = null, poiDistances = null, edgeContext = null) {
     // Base cost is the physical distance.
     const distance = calculateDistance(current, neighbor);
     const neighborId = nodeToId(neighbor);
@@ -615,33 +961,24 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
     // strictly less, down to the physical-distance floor.
     let penalty = 0;
 
-    // Environmental data hierarchy (Option B — real GUIDES selection, non-blocking):
-    //   0) real low-res pre-fetch seed (isSynthetic:false) — colors the SELECTION cost
-    //   1) pre-baked static tile cache (lookupEnv)
-    //   2) supplied environmentalData list
-    //   3) marked synthetic fallback (isSynthetic:true — never blocks, never "real")
+    // Real-only environmental data hierarchy:
+    //   0) real low-res pre-fetch seed (isSynthetic:false)
+    //   1) supplied real environmentalData list
+    // Missing real values are skipped instead of replaced with synthetic/defaults.
     let envData = lookupSeededRealEnv(neighbor.lat, neighbor.lon);
     if (envData) {
         envCostStats.realSeedHits++;
-    } else {
-        envData = lookupEnv(neighbor.lat, neighbor.lon);
-        if (envData) envCostStats.staticTileHits++;
     }
     if (!envData && environmentalData) {
-        envData = findClosestEnvironmentalData(neighbor, environmentalData);
+        envData = findClosestRealEnvironmentalData(neighbor, environmentalData);
         if (envData) envCostStats.suppliedHits++;
     }
     if (!envData) {
-        // Fast synthetic fallback: real environmental data is sampled later for the
-        // final route; doing live API calls for every grid node makes long routes
-        // take 30+ seconds. The pre-fetch seed above is what introduces real data
-        // into selection without that per-node cost.
-        envData = getFastEnvironmentalData(neighbor.lat, neighbor.lon, patientCondition);
         envCostStats.syntheticHits++;
     }
 
     // Apply environmental weights based on patient condition
-    if (patientCondition && patientCondition.name !== "default") {
+    if (envData && patientCondition && patientCondition.name !== "default") {
         // Base multipliers
         const airQualityMultiplier = patientCondition.airQualitySensitivity || 1;
         const slopeMultiplier = patientCondition.slopeSensitivity || 1;
@@ -735,7 +1072,7 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
     }
     
     // Apply user-preference weights alongside the pathology profile
-    if (patientCondition) {
+    if (envData && patientCondition) {
         const combinedNature = (patientCondition.patientNature || 0) + (preferences?.nature || 0);
         const combinedEntertainment = (patientCondition.patientEntertainment || 0) + (preferences?.entertainment || 0);
         const combinedNightlife = (patientCondition.patientNightlife || 0) + (preferences?.nightlife || 0);
@@ -768,15 +1105,20 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
             const weight = (patientCondition?.[patientKey] || 0) + (preferences?.[category] || 0);
             if (weight !== 0) {
                 const nearestDist = distances?.[category] ?? nearestPoiDistance(neighbor, poiLists?.[category]);
-                penalty = applyPreferencePoiAdjustment(penalty, weight, nearestDist);
+                penalty = applyPreferencePoiAdjustment(penalty, weight, nearestDist, category);
             }
         }
     }
 
     // P0 audit fix: floor the net penalty at 0 so the edge increment is always
     // >= physical distance (NO negative arc weights). Greener/closer-to-POI arcs
-    // are still cheaper, but never below the straight-line distance.
-    return currentGScore + distance + Math.max(0, penalty);
+    // are still cheaper, but never below the straight-line distance. The penalty
+    // model was tuned around ~100 m grid cells; scale it by edge length so real
+    // OSM graph edges do not accidentally prefer many tiny segments or punish a
+    // single long segment out of proportion.
+    penalty += calculateStreetEdgePenalty(edgeContext, patientCondition, preferences);
+    const edgeScale = Math.max(0.25, distance / 100);
+    return currentGScore + distance + Math.max(0, penalty) * edgeScale;
 }
 
 /**
@@ -785,7 +1127,7 @@ async function calculateCost(current, neighbor, currentGScore, patientCondition,
  * @param {Array} environmentalData - Array of environmental data points
  * @returns {Object} Closest environmental data
  */
-function findClosestEnvironmentalData(node, environmentalData) {
+function findClosestRealEnvironmentalData(node, environmentalData) {
     if (!environmentalData || environmentalData.length === 0) {
         return null;
     }
@@ -794,6 +1136,9 @@ function findClosestEnvironmentalData(node, environmentalData) {
     let closestData = null;
     
     for (const dataPoint of environmentalData) {
+        if (!isRealEnvironmentData(dataPoint)) {
+            continue;
+        }
         if (dataPoint.coordinate) {
             const distance = calculateDistance(
                 node, 
@@ -1122,7 +1467,7 @@ function addRoutePenalties(penalties, routeResult, nodePenalty = 100, nearbyPena
  * @param {Number} numRoutes - Number of alternative routes to generate
  * @returns {Array} Array of routes
  */
-export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3, preferences = null, distanceTolerance = 1) {
+export async function generateAlternativeRoutes(start, goal, map, patientCondition, numRoutes = 3, preferences = null, distanceTolerance = 1, transportMode = 'walking') {
     // Apply the UI distance-tolerance slider for this whole route calculation:
     // widens the search bbox and amplifies the green reward (slider=1 = baseline).
     setDistanceTolerance(distanceTolerance);
@@ -1150,22 +1495,54 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
 
     const poiLists = {};
     await Promise.all(activeCategories.map(async category => {
-        poiLists[category] = await fetchPoiLocations(bbox, category);
+        poiLists[category] = await fetchPoiLocationsWithBudget(bbox, category);
     }));
 
-    // No live environmental data is passed into A*: the cost function falls back
-    // to a fast synthetic model for grid nodes. Real weather/air-quality data is
-    // sampled later, once the final route has been found (max ~20 points).
-    const firstRoute = await findOptimalRoute(
-        start,
-        goal,
-        map,
-        patientCondition,
-        null,
-        gridResolution,
-        preferences,
-        poiLists,
-    );
+    const useLegacyGridAstar = window.PATHPLANNER_USE_GRID_ASTAR === true;
+    let streetGraph = null;
+    if (!useLegacyGridAstar) {
+        try {
+            streetGraph = await fetchStreetGraphForBounds(bbox, transportMode);
+            if (!benchmarkMode) {
+                console.log(
+                    `[generateAlternativeRoutes] Using real OSM street graph ` +
+                    `(${streetGraph.count?.nodes ?? streetGraph.nodes.length} nodes)`
+                );
+            }
+        } catch (error) {
+            console.warn(
+                '[generateAlternativeRoutes] Real OSM street graph unavailable; ' +
+                'skipping environmental A* instead of falling back to an artificial grid:',
+                error.message
+            );
+            return [];
+        }
+    }
+
+    const runAstar = () => streetGraph
+        ? findOptimalRouteOnStreetGraph(
+            start,
+            goal,
+            streetGraph,
+            patientCondition,
+            null,
+            preferences,
+            poiLists,
+        )
+        : findOptimalRoute(
+            start,
+            goal,
+            map,
+            patientCondition,
+            null,
+            gridResolution,
+            preferences,
+            poiLists,
+        );
+
+    // A* consumes only real env seed/supplied data plus real POIs. Missing
+    // environmental fields are skipped, not replaced with synthetic values.
+    const firstRoute = await runAstar();
     
     const routes = [];
     const acceptedRouteSignatures = new Set();
@@ -1208,8 +1585,8 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
         for (let attempt = 0; attempt < ASTAR_ALTERNATIVE_MAX_ATTEMPTS; attempt++) {
             // Create a modified cost calculation function with penalties
             const originalCalculateCost = calculateCost;
-            const calculateCostWithPenalties = async (current, neighbor, currentGScore, patientCondition, environmentalData, prefs, lists, poiDistances) => {
-                let cost = await originalCalculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, prefs, lists, poiDistances);
+            const calculateCostWithPenalties = async (current, neighbor, currentGScore, patientCondition, environmentalData, prefs, lists, poiDistances, edgeContext) => {
+                let cost = await originalCalculateCost(current, neighbor, currentGScore, patientCondition, environmentalData, prefs, lists, poiDistances, edgeContext);
 
                 // Add penalties for previously visited nodes
                 const neighborId = nodeToId(neighbor);
@@ -1225,16 +1602,7 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
                 calculateCost = calculateCostWithPenalties;
 
                 // Generate alternative route
-                alternativeRoute = await findOptimalRoute(
-                    start,
-                    goal,
-                    map,
-                    patientCondition,
-                    null,
-                    gridResolution,
-                    preferences,
-                    poiLists,
-                );
+                alternativeRoute = await runAstar();
             } finally {
                 // Restore original cost function even if A* fails
                 calculateCost = originalCalculateCost;
@@ -1267,40 +1635,6 @@ export async function generateAlternativeRoutes(start, goal, map, patientConditi
     routes.sort((a, b) => a.environmentalScore - b.environmentalScore);
     
     return routes;
-}
-
-/**
- * Collect environmental data along a path
- * @param {Array} path - Array of nodes
- * @param {Object} patientCondition - Patient condition
- * @param {Number} routeIndex - Index for variation between routes (optional)
- * @returns {Array} Environmental data for the path
- */
-async function collectEnvironmentalData(path, patientCondition, routeIndex = 0) {
-    const environmentalData = [];
-
-    const benchmarkMode = window.PATHPLANNER_BENCHMARK === true;
-    const sampleCount = benchmarkMode
-        ? Math.min(4, path.length)
-        : Math.min(20, path.length);
-    const step = Math.max(1, Math.floor(path.length / sampleCount));
-
-    // Use the same fast synthetic generator as the A* cost function. Calling live
-    // weather/air-quality APIs for every sample point is the main reason long
-    // routes take 30+ seconds to calculate.
-    for (let i = 0; i < path.length; i += step) {
-        if (environmentalData.length >= sampleCount) break;
-
-        const node = path[i];
-        if (!node || typeof node.lat !== 'number' || typeof node.lon !== 'number') continue;
-
-        const envData = { ...getFastEnvironmentalData(node.lat, node.lon, patientCondition) };
-        envData.coordinate = { lat: node.lat, lng: node.lon };
-        envData.routeIndex = routeIndex;
-        environmentalData.push(envData);
-    }
-
-    return environmentalData;
 }
 
 /**

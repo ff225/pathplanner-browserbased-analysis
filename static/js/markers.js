@@ -50,6 +50,14 @@ document.addEventListener("DOMContentLoaded", function() {
         ]);
         map.fitBounds(bounds, { padding: [50, 50] });
     }
+
+    if (window.PathPlannerMapState) {
+        const restoredStart = window.PathPlannerMapState.restorePoint('startPoint', startPointInput);
+        const restoredEnd = window.PathPlannerMapState.restorePoint('endPoint', endPointInput);
+        if (restoredStart && restoredEnd) {
+            window.requestAnimationFrame(updateMarkers);
+        }
+    }
     
     // Update markers when search button is clicked
     if (searchButton) {
@@ -58,12 +66,14 @@ document.addEventListener("DOMContentLoaded", function() {
     
     // Update markers when inputs change directly
     startPointInput.addEventListener('change', function() {
+        window.PathPlannerMapState?.savePoint('startPoint', this);
         if (this.dataset.lat && this.dataset.lon && endPointInput.dataset.lat && endPointInput.dataset.lon) {
             updateMarkers();
         }
     });
     
     endPointInput.addEventListener('change', function() {
+        window.PathPlannerMapState?.savePoint('endPoint', this);
         if (this.dataset.lat && this.dataset.lon && startPointInput.dataset.lat && startPointInput.dataset.lon) {
             updateMarkers();
         }

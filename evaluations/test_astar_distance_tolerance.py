@@ -87,6 +87,58 @@ def test_green_reward_scales_edge_cost(monkeypatch):
     assert cost_baseline >= distance
 
 
+def test_negative_poi_weight_penalizes_closeness(monkeypatch):
+    """Clinical presets use negative weights for unwanted POIs (e.g. nightlife).
+
+    A nearby unwanted POI must cost MORE than a far unwanted POI; otherwise
+    "avoid nightlife" silently behaves like "ignore nightlife".
+    """
+    neutral = {
+        'airQuality': 4.0, 'temperature': 22.0, 'humidity': 50.0,
+        'noise': 3.0, 'slope': 0.0, 'greenSpace': 3.0, 'weather': 1.0,
+        'trafficDensity': 0.0, 'greenVisibility': 0.3,
+        'emergencyAccessibility': 0.7, 'surfaceQuality': 0.0, 'sensoryLoad': 0.0,
+    }
+    monkeypatch.setattr(ea, '_get_env', lambda lat, lon: dict(neutral))
+
+    current = {'lat': 44.6400, 'lon': 10.9200}
+    neighbor = {'lat': 44.6410, 'lon': 10.9200}
+    patient = ea.PATIENT_CONDITIONS['respiratory']
+    prefs = {'nightlife': -5}
+
+    near_poi = {'nightlife': [(neighbor['lat'], neighbor['lon'])]}
+    far_poi = {'nightlife': [(neighbor['lat'] + 0.02, neighbor['lon'] + 0.02)]}
+
+    near_cost = ea.calculate_edge_cost(current, neighbor, 0.0, patient, preferences=prefs, poi_lists=near_poi)
+    far_cost = ea.calculate_edge_cost(current, neighbor, 0.0, patient, preferences=prefs, poi_lists=far_poi)
+
+    assert near_cost > far_cost
+
+
+def test_positive_poi_weight_penalizes_distance(monkeypatch):
+    """Positive preference weights should prefer being close to matching POIs."""
+    neutral = {
+        'airQuality': 4.0, 'temperature': 22.0, 'humidity': 50.0,
+        'noise': 3.0, 'slope': 0.0, 'greenSpace': 3.0, 'weather': 1.0,
+        'trafficDensity': 0.0, 'greenVisibility': 0.3,
+        'emergencyAccessibility': 0.7, 'surfaceQuality': 0.0, 'sensoryLoad': 0.0,
+    }
+    monkeypatch.setattr(ea, '_get_env', lambda lat, lon: dict(neutral))
+
+    current = {'lat': 44.6400, 'lon': 10.9200}
+    neighbor = {'lat': 44.6410, 'lon': 10.9200}
+    patient = ea.PATIENT_CONDITIONS['respiratory']
+    prefs = {'nature': 5}
+
+    near_poi = {'nature': [(neighbor['lat'], neighbor['lon'])]}
+    far_poi = {'nature': [(neighbor['lat'] + 0.02, neighbor['lon'] + 0.02)]}
+
+    near_cost = ea.calculate_edge_cost(current, neighbor, 0.0, patient, preferences=prefs, poi_lists=near_poi)
+    far_cost = ea.calculate_edge_cost(current, neighbor, 0.0, patient, preferences=prefs, poi_lists=far_poi)
+
+    assert far_cost > near_cost
+
+
 def test_find_optimal_route_default_tolerance_is_baseline(monkeypatch):
     # Network-free: stub env to a constant so find_optimal_route only exercises the
     # geometry/threading. Confirms the new param is backward-compatible (default=1).

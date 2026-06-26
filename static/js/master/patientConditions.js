@@ -27,7 +27,9 @@ async function getPatientCondition(
 
     if (patientConditionSelect.value !== "none") {
         if (preferenceSet) {
-            preferenceSet.value = "Choose preferences...";
+            preferenceSet.value = preferenceSet.querySelector('option[value="balanced"]')
+                ? "balanced"
+                : (preferenceSet.options[0]?.value || "");
         }
 
         await Preferences.setCurrentPreferences(currentPreferences, Preferences.DEFAULT);

@@ -1208,14 +1208,14 @@ export async function getPointEnvironmentalData(lat, lon, patientCondition) {
             new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 500))
         ]);
         
-        // Cache the result
-        return routeCalculationCache.set(cacheKey, data);
+        if (data && data.isDefault !== true && data.isSynthetic !== true) {
+            return routeCalculationCache.set(cacheKey, data);
+        }
+        console.warn(`Fast environmental data lookup returned no real data for ${lat},${lon}`);
+        return null;
     } catch (error) {
         console.log(`Fast environmental data lookup failed for ${lat},${lon}: ${error.message}`);
-        
-        // Use location-based synthetic data instead of slow API calls
-        const syntheticData = createLocationBasedEnvironmentalData(lat, lon, patientCondition);
-        return routeCalculationCache.set(cacheKey, syntheticData);
+        return null;
     }
 }
 

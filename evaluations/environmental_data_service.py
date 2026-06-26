@@ -16,7 +16,7 @@ import math
 import os
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -122,6 +122,7 @@ _overpass_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKE
 # fires 3 queries per node and can trip its breaker under load, but that must
 # NOT blank out the interactive map overlay, which fires one query per request.
 _overpass_poi_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKER_COOLDOWN)
+_overpass_street_graph_breaker = _OverpassBreaker(OVERPASS_BREAKER_THRESHOLD, OVERPASS_BREAKER_COOLDOWN)
 _overpass_mirror_index = 0  # rotates the starting mirror across calls
 
 
@@ -143,6 +144,8 @@ def reset_overpass_state() -> None:
     _overpass_breaker.opened_at = None
     _overpass_poi_breaker.failures = 0
     _overpass_poi_breaker.opened_at = None
+    _overpass_street_graph_breaker.failures = 0
+    _overpass_street_graph_breaker.opened_at = None
     _overpass_mirror_index = 0
     _CACHE.clear()
 
@@ -413,9 +416,55 @@ _POI_CATEGORIES = {
         'kind_keys': ('amenity', 'healthcare'),
         'keep_unnamed_kinds': {'hospital'},
     },
+    'entertainment': {
+        'filters': (
+            'node["amenity"~"^(cinema|theatre|concert_hall|arts_centre)$"]',
+            'way["amenity"~"^(cinema|theatre|concert_hall|arts_centre)$"]',
+            'relation["amenity"~"^(cinema|theatre|concert_hall|arts_centre)$"]',
+        ),
+        'kind_keys': ('amenity',),
+        'keep_unnamed_kinds': set(),
+    },
+    'nightlife': {
+        'filters': (
+            'node["amenity"~"^(bar|pub|nightclub)$"]',
+            'way["amenity"~"^(bar|pub|nightclub)$"]',
+            'relation["amenity"~"^(bar|pub|nightclub)$"]',
+        ),
+        'kind_keys': ('amenity',),
+        'keep_unnamed_kinds': set(),
+    },
+    'tourism': {
+        'filters': (
+            'node["tourism"~"^(attraction|museum|viewpoint|gallery)$"]',
+            'way["tourism"~"^(attraction|museum|viewpoint|gallery)$"]',
+            'relation["tourism"~"^(attraction|museum|viewpoint|gallery)$"]',
+        ),
+        'kind_keys': ('tourism',),
+        'keep_unnamed_kinds': {'attraction', 'viewpoint'},
+    },
 }
 POI_CATEGORIES = tuple(_POI_CATEGORIES.keys())
 _MAX_POI_BBOX_SPAN = 0.25  # ~25 km guard against oversized Overpass queries
+OVERPASS_STREET_GRAPH_TIMEOUT = 10
+_MAX_STREET_GRAPH_BBOX_SPAN = 0.22  # route-corridor guard; avoids city-scale road dumps
+_MAX_STREET_GRAPH_WAYS = 12000
+_MAX_STREET_GRAPH_NODES = 60000
+
+_STREET_GRAPH_HIGHWAYS = {
+    'walking': (
+        'footway|path|pedestrian|steps|cycleway|residential|living_street|service|'
+        'unclassified|tertiary|secondary|primary|track'
+    ),
+    'cycling': (
+        'cycleway|path|residential|living_street|service|unclassified|tertiary|'
+        'secondary|primary|track'
+    ),
+    'car': (
+        'motorway|trunk|primary|secondary|tertiary|unclassified|residential|'
+        'living_street|service'
+    ),
+}
 
 
 def _poi_kind(tags: Dict[str, Any], kind_keys) -> Optional[str]:
@@ -497,6 +546,117 @@ def fetch_named_pois(
         'category': category,
         'count': len(pois),
         'source': 'OpenStreetMap-Overpass',
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
+def fetch_street_graph(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    mode: str = 'walking',
+) -> Dict[str, Any]:
+    """Fetch a real OSM street graph inside a route corridor bbox.
+
+    The result is intentionally not a persistent city cache. It is a short-lived,
+    exact-bbox in-memory cache shared with other environmental calls so repeated
+    clicks do not hammer Overpass, while a different city or route bbox triggers
+    a fresh real lookup.
+    """
+    if max_lat < min_lat:
+        min_lat, max_lat = max_lat, min_lat
+    if max_lon < min_lon:
+        min_lon, max_lon = max_lon, min_lon
+    if (max_lat - min_lat) > _MAX_STREET_GRAPH_BBOX_SPAN or (
+        max_lon - min_lon
+    ) > _MAX_STREET_GRAPH_BBOX_SPAN:
+        raise ValueError('street graph bounding box too large')
+
+    mode = mode if mode in _STREET_GRAPH_HIGHWAYS else 'walking'
+    cache_key = (
+        f'street-graph:{mode}:'
+        f'{round(min_lat,4)},{round(min_lon,4)},{round(max_lat,4)},{round(max_lon,4)}'
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
+    highways = _STREET_GRAPH_HIGHWAYS[mode]
+    access_filter = '["access"!~"^(private|no)$"]'
+    if mode == 'walking':
+        access_filter += '["foot"!~"^(private|no)$"]'
+    elif mode == 'cycling':
+        access_filter += '["bicycle"!~"^(private|no)$"]'
+    else:
+        access_filter += '["motor_vehicle"!~"^(private|no)$"]'
+
+    query = f"""
+        [out:json][timeout:{OVERPASS_STREET_GRAPH_TIMEOUT}];
+        (
+          way["highway"~"^({highways})$"]{access_filter}({bbox});
+        );
+        out body {_MAX_STREET_GRAPH_WAYS};
+        >;
+        out skel qt {_MAX_STREET_GRAPH_NODES};
+    """
+    data = _overpass_post(
+        query,
+        breaker=_overpass_street_graph_breaker,
+        timeout=OVERPASS_STREET_GRAPH_TIMEOUT,
+    )
+    if data is None:
+        raise RuntimeError('Overpass unavailable for street graph lookup')
+
+    elements = data.get('elements') if isinstance(data, dict) else None
+    if not isinstance(elements, list):
+        raise RuntimeError('Overpass returned an invalid street graph payload')
+
+    raw_nodes: Dict[int, Dict[str, float]] = {}
+    raw_ways: List[Dict[str, Any]] = []
+    required_node_ids: Set[int] = set()
+    for element in elements:
+        element_type = element.get('type')
+        if element_type == 'node' and element.get('lat') is not None and element.get('lon') is not None:
+            raw_nodes[int(element['id'])] = {
+                'id': int(element['id']),
+                'lat': float(element['lat']),
+                'lon': float(element['lon']),
+            }
+        elif element_type == 'way':
+            refs = [
+                int(ref)
+                for ref in element.get('nodes', [])
+                if isinstance(ref, (int, float))
+            ]
+            if len(refs) < 2:
+                continue
+            required_node_ids.update(refs)
+            tags = element.get('tags') or {}
+            raw_ways.append({
+                'id': int(element['id']),
+                'nodes': refs,
+                'highway': tags.get('highway'),
+                'name': tags.get('name'),
+                'oneway': tags.get('oneway'),
+            })
+
+    nodes = [node for node_id, node in raw_nodes.items() if node_id in required_node_ids]
+    node_ids = {node['id'] for node in nodes}
+    ways = [
+        {**way, 'nodes': [node_id for node_id in way['nodes'] if node_id in node_ids]}
+        for way in raw_ways
+    ]
+    ways = [way for way in ways if len(way['nodes']) >= 2]
+
+    result = {
+        'nodes': nodes,
+        'ways': ways,
+        'mode': mode,
+        'source': 'OpenStreetMap-Overpass',
+        'count': {'nodes': len(nodes), 'ways': len(ways)},
     }
     _cache_set(cache_key, result)
     return result

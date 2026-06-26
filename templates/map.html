@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
     <link href="{% static 'css/theme.css' %}" rel="stylesheet">
     <link href="{% static 'css/suggestions.css' %}" rel="stylesheet">
-    <link href="{% static 'css/map.css' %}" rel="stylesheet">
+    <link href="{% static 'css/map.css' %}?v=20260626-layer-routing" rel="stylesheet">
 </head>
 <body>
     <div class="container-fluid map-shell" id="mapShell">
@@ -83,28 +83,36 @@
                             class="form-select"
                             id="preferenceSet"
                             data-weights-url-template="{% url 'users:preference_weights' 0 %}"
-                            {% if not user_preferences %}disabled{% endif %}
                         >
+                            <optgroup label="Routing presets">
+                                <option value="balanced" selected>Balanced</option>
+                                <option value="nature_lover">Parks and green areas</option>
+                                <option value="medical">Medical access</option>
+                                <option value="tourist">Tourism and landmarks</option>
+                                <option value="entertainment">Entertainment</option>
+                                <option value="nightlife">Nightlife</option>
+                            </optgroup>
                             {% if user_preferences %}
-                                <option selected>Choose preferences...</option>
-                                {% for preference in user_preferences %}
-                                    <option
-                                        value="{{ preference.id }}"
-                                        data-edit-url="{% url 'users:edit_set' preference.id %}?next={% url 'map' %}"
-                                        data-delete-url="{% url 'users:delete_set' preference.id %}"
-                                    >
-                                        {{ preference.name }}
-                                    </option>
-                                {% endfor %}
-                            {% else %}
-                                <option selected>No saved preferences</option>
+                                <optgroup label="Saved preferences">
+                                    {% for preference in user_preferences %}
+                                        <option
+                                            value="{{ preference.id }}"
+                                            data-edit-url="{% url 'users:edit_set' preference.id %}?next={% url 'map' %}"
+                                            data-delete-url="{% url 'users:delete_set' preference.id %}"
+                                        >
+                                            {{ preference.name }}
+                                        </option>
+                                    {% endfor %}
+                                </optgroup>
                             {% endif %}
                         </select>
-                        <div class="preference-actions btn-group w-100 mt-2" role="group" aria-label="Preference actions">
-                            <a href="{% url 'users:add_set' %}?next={% url 'map' %}" class="btn btn-sm btn-outline-primary">Add</a>
-                            <a id="preferenceEditLink" href="#" class="btn btn-sm btn-outline-primary disabled" aria-disabled="true">Edit</a>
-                            <button id="preferenceDeleteButton" type="submit" form="preferenceDeleteForm" class="btn btn-sm btn-outline-danger" disabled>Delete</button>
-                        </div>
+                        {% if user.is_authenticated %}
+                            <div class="preference-actions btn-group w-100 mt-2" role="group" aria-label="Preference actions">
+                                <a href="{% url 'users:add_set' %}?next={% url 'map' %}" class="btn btn-sm btn-outline-primary">Add</a>
+                                <a id="preferenceEditLink" href="#" class="btn btn-sm btn-outline-primary disabled" aria-disabled="true">Edit</a>
+                                <button id="preferenceDeleteButton" type="submit" form="preferenceDeleteForm" class="btn btn-sm btn-outline-danger" disabled>Delete</button>
+                            </div>
+                        {% endif %}
                     </div>
                     <section class="patient-card" aria-labelledby="patientConditionLabel">
                         <label class="patient-title" id="patientConditionLabel" for="patientCondition">
@@ -112,9 +120,7 @@
                             <strong>Clinical routing profile</strong>
                         </label>
                         <select class="form-select" id="patientCondition" aria-describedby="patientConditionHelp">
-                            <option value="none" {% if not user_preferences %}disabled{% endif %} {% if default_pathology == 'none' %}selected{% endif %}>
-                                {% if user_preferences %}Use saved preferences{% else %}No preferences saved{% endif %}
-                            </option>
+                            <option value="none" {% if default_pathology == 'none' %}selected{% endif %}>Use routing preferences</option>
                             <option value="respiratory" {% if default_pathology == 'respiratory' %}selected{% endif %}>Respiratory condition</option>
                             <option value="cardiac" {% if default_pathology == 'cardiac' %}selected{% endif %}>Cardiac condition</option>
                             <option value="arthritis" {% if default_pathology == 'arthritis' %}selected{% endif %}>Arthritis or joint pain</option>
@@ -122,7 +128,7 @@
                             <option value="mobility" {% if default_pathology == 'mobility' %}selected{% endif %}>Limited mobility</option>
                             <option value="diabetes" {% if default_pathology == 'diabetes' %}selected{% endif %}>Diabetes</option>
                         </select>
-                        <p class="patient-helper" id="patientConditionHelp">Applies health-aware route weighting while keeping saved preferences available.</p>
+                        <p class="patient-helper" id="patientConditionHelp">Adds clinical weighting on top of the selected routing preset.</p>
                     </section>
                     <div class="routing-mode-caption form-check form-switch" id="legacyModeRow">
                         <input class="form-check-input" type="checkbox" id="legacyMode">
@@ -318,6 +324,7 @@
         window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_access_token|escapejs }}";
     </script>
     
+    <script src="{% static 'js/mapState.js' %}"></script>
     <script src="{% static 'js/suggestions.js' %}"></script>
     <script src="{% static 'js/map.js' %}"></script>
     <script src="{% static 'js/markers.js' %}"></script>
@@ -329,7 +336,7 @@
     <script src="{% static 'js/benchmark/automation.js' %}" type="module"></script>
     {% endif %}
     <script src="{% static 'js/location.js' %}"></script>
-    <script src="{% static 'js/heatmap.js' %}"></script>
+    <script src="{% static 'js/heatmap.js' %}?v=20260626-layer-routing"></script>
 
     <script>
         {% if messages %}
@@ -351,6 +358,7 @@
 
             percentageSlider.addEventListener('input', function() {
                 percentageValue.textContent = `x${percentageSlider.value}`;
+                window.PathPlannerMapState?.saveValue('percentageSlider', percentageSlider.value);
             });
         }
     </script>

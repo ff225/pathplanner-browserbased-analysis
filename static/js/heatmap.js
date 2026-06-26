@@ -21,21 +21,19 @@ document.addEventListener("DOMContentLoaded", function() {
     var ALL_LAYER_IDS = AIR_LAYER_IDS.concat(['pollen']);
 
     var HEAT_GRADIENT = {
-        0.0: 'blue',
-        0.2: 'cyan',
-        0.4: 'lime',
-        0.6: 'yellow',
-        0.8: 'orange',
-        1.0: 'red'
+        0.0: '#38bdf8',
+        0.35: '#22c55e',
+        0.62: '#f59e0b',
+        0.82: '#ef4444',
+        1.0: '#7f1d1d'
     };
 
     var AIR_GRADIENT_STOPS = [
-        { color: 'blue', position: '0%' },
-        { color: 'cyan', position: '20%' },
-        { color: 'lime', position: '40%' },
-        { color: 'yellow', position: '60%' },
-        { color: 'orange', position: '80%' },
-        { color: 'red', position: '100%' }
+        { color: '#38bdf8', position: '0%' },
+        { color: '#22c55e', position: '35%' },
+        { color: '#f59e0b', position: '62%' },
+        { color: '#ef4444', position: '82%' },
+        { color: '#7f1d1d', position: '100%' }
     ];
 
     var POLLEN_GRADIENT_STOPS = [
@@ -76,7 +74,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#2563eb',
             emptyMessage: 'No PM2.5 readings are available in the latest station dataset.',
             meaning: 'Fine particulate matter (≤2.5 µm) that can travel deep into the lungs.',
-            source: 'Real station measurements, normalized to a 25 µg/m³ reference scale. The heat field is interpolated around station points.'
+            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         pm10: {
             label: 'PM10',
@@ -87,7 +85,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#7c3aed',
             emptyMessage: 'No PM10 readings are available in the latest station dataset.',
             meaning: 'Inhalable particulate matter (≤10 µm), often from dust, traffic, and combustion.',
-            source: 'Real station measurements, normalized to a 50 µg/m³ reference scale. The heat field is interpolated around station points.'
+            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         no2: {
             label: 'NO₂',
@@ -98,7 +96,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#dc2626',
             emptyMessage: 'No NO₂ readings are available in the latest station dataset.',
             meaning: 'Nitrogen dioxide, mainly tied to combustion and roadside traffic pollution.',
-            source: 'Real station measurements, normalized to a 200 µg/m³ reference scale. The heat field is interpolated around station points.'
+            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         o3: {
             label: 'O₃',
@@ -109,7 +107,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#ea580c',
             emptyMessage: 'No O₃ readings are available in the latest station dataset.',
             meaning: 'Ground-level ozone, a secondary pollutant that often rises on sunny stagnant days.',
-            source: 'Real station measurements, normalized to a 180 µg/m³ reference scale. The heat field is interpolated around station points.'
+            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         pollen: {
             label: 'Pollen',
@@ -128,7 +126,8 @@ document.addEventListener("DOMContentLoaded", function() {
         loading: true,
         loaded: false,
         error: null,
-        stationCount: 0
+        stationCount: 0,
+        sourceLabel: 'stations'
     };
 
     // Deterministic station spread: measurement intensity is real, positions are
@@ -145,6 +144,10 @@ document.addEventListener("DOMContentLoaded", function() {
         });
         return offsets;
     })();
+
+    var AIR_SAMPLE_OFFSETS = [
+        [0, 0]
+    ];
 
     function initializeLayerStates() {
         ALL_LAYER_IDS.forEach(function(layerId) {
@@ -303,9 +306,10 @@ document.addEventListener("DOMContentLoaded", function() {
             return 'Air-quality station data could not be loaded. Pollen can still be requested.';
         }
         if (stationDataState.stationCount === 0) {
-            return 'No air-quality stations were returned. Pollen can still be requested.';
+            return 'No air-quality data points were returned. Pollen can still be requested.';
         }
-        return 'Air-quality layers ready from ' + stationDataState.stationCount + ' stations. Pollen loads from Open-Meteo.';
+        return 'Air-quality layers ready from ' + stationDataState.stationCount + ' ' +
+            stationDataState.sourceLabel + '. Pollen loads from Open-Meteo.';
     }
 
     function buildLegendItem(layerId) {
@@ -334,7 +338,7 @@ document.addEventListener("DOMContentLoaded", function() {
             '</div>' +
             '<div style="height:8px;border-radius:999px;margin:7px 0 4px;background:' + buildGradientCss(config.gradientStops) + ';" aria-hidden="true"></div>' +
             '<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:#475569;">' +
-                '<span>Low</span><span>' + escapeHtml(config.highLabel) + '</span>' +
+                '<span>Lower exposure</span><span>' + escapeHtml(config.highLabel) + '</span>' +
             '</div>' +
             '<div style="font-size:0.75rem;color:#334155;margin-top:6px;line-height:1.25;">' + escapeHtml(config.meaning) + '</div>' +
             '<div style="font-size:0.72rem;color:#64748b;margin-top:5px;line-height:1.25;">' + escapeHtml(detail) + '</div>' +
@@ -406,6 +410,22 @@ document.addEventListener("DOMContentLoaded", function() {
 
     function resolvePollenCenter() {
         // Same coords source the search/markers use: the selected start point.
+        var startInput = document.getElementById('startPoint');
+        if (startInput && startInput.dataset.lat && startInput.dataset.lon) {
+            var sLat = parseFloat(startInput.dataset.lat);
+            var sLon = parseFloat(startInput.dataset.lon);
+            if (isFinite(sLat) && isFinite(sLon)) {
+                return { lat: sLat, lon: sLon };
+            }
+        }
+        var center = map.getCenter ? map.getCenter() : null;
+        if (center && isFinite(center.lat) && isFinite(center.lng)) {
+            return { lat: center.lat, lon: center.lng };
+        }
+        return { lat: 44.645819, lon: 10.925719 };
+    }
+
+    function resolveAirLayerCenter() {
         var startInput = document.getElementById('startPoint');
         if (startInput && startInput.dataset.lat && startInput.dataset.lon) {
             var sLat = parseFloat(startInput.dataset.lat);
@@ -784,6 +804,70 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     }
 
+    function measurementValue(payload, pollutant) {
+        var measurements = Array.isArray(payload && payload.measurements) ? payload.measurements : [];
+        var match = measurements.find(function(measurement) {
+            return measurement && measurement.parameter === pollutant && measurement.value !== null && measurement.value !== undefined;
+        });
+        var value = match ? Number(match.value) : null;
+        return isFinite(value) ? value : null;
+    }
+
+    function stationFromAirSample(payload, fallbackLat, fallbackLon, index) {
+        var coords = payload && payload.coordinates ? payload.coordinates : {};
+        var lat = Number(coords.latitude);
+        var lon = Number(coords.longitude);
+        return {
+            nome: payload && payload.station ? payload.station : 'Open-Meteo air grid',
+            prov: '',
+            ind: payload && payload.timestamp ? payload.timestamp + ' UTC' : '',
+            com: payload && payload.provider ? payload.provider : 'Open-Meteo',
+            cod: 'air-sample-' + index,
+            lat: isFinite(lat) ? lat : fallbackLat,
+            lng: isFinite(lon) ? lon : fallbackLon,
+            pm25: measurementValue(payload, 'pm25'),
+            pm10: measurementValue(payload, 'pm10'),
+            no2: measurementValue(payload, 'no2'),
+            o3: measurementValue(payload, 'o3')
+        };
+    }
+
+    function fetchSampledAirQualityLayers() {
+        var center = resolveAirLayerCenter();
+        var samplePoints = AIR_SAMPLE_OFFSETS.map(function(offset) {
+            var point = offsetPoint(center.lat, center.lon, offset[0], offset[1]);
+            return { lat: point[0], lon: point[1] };
+        });
+
+        renderLayerUI('No saved station readings found. Loading real air-quality samples for the current map area...');
+
+        return Promise.all(samplePoints.map(function(point, index) {
+            var url = '/api/air_quality/?lat=' + encodeURIComponent(point.lat) +
+                '&lon=' + encodeURIComponent(point.lon);
+            return fetch(url)
+                .then(function(response) {
+                    if (!response.ok) {
+                        throw new Error('HTTP ' + response.status);
+                    }
+                    return response.json();
+                })
+                .then(function(payload) {
+                    if (!payload || payload.isDefault) {
+                        return null;
+                    }
+                    return stationFromAirSample(payload, point.lat, point.lon, index);
+                })
+                .catch(function(error) {
+                    console.warn('[heatmap] air-quality sample failed:', error);
+                    return null;
+                });
+        })).then(function(samples) {
+            return samples.filter(function(sample) {
+                return sample !== null;
+            });
+        });
+    }
+
     // Register all toggles before any API returns so chips never go dead.
     ALL_LAYER_IDS.forEach(registerLayerButton);
     renderLayerUI();
@@ -814,7 +898,8 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     }
 
-    // Fetch real station data and build pollutant heatmaps.
+    // Fetch real station data and build pollutant heatmaps. If the local DB has
+    // no station rows, use real provider samples around the current map area.
     fetch('/api/stazioni_dati/')
         .then(function(response) {
             if (!response.ok) {
@@ -827,13 +912,28 @@ document.addEventListener("DOMContentLoaded", function() {
                 throw new Error('Unexpected station payload');
             }
 
-            stationDataState.loading = false;
-            stationDataState.loaded = true;
-            stationDataState.error = null;
-            stationDataState.stationCount = data.length;
+            if (data.length > 0) {
+                stationDataState.loading = false;
+                stationDataState.loaded = true;
+                stationDataState.error = null;
+                stationDataState.stationCount = data.length;
+                stationDataState.sourceLabel = data.length === 1 ? 'station' : 'stations';
 
-            buildAirQualityLayers(data);
-            applyPendingAirLayers();
+                buildAirQualityLayers(data);
+                applyPendingAirLayers();
+                return;
+            }
+
+            return fetchSampledAirQualityLayers().then(function(samples) {
+                stationDataState.loading = false;
+                stationDataState.loaded = true;
+                stationDataState.error = null;
+                stationDataState.stationCount = samples.length;
+                stationDataState.sourceLabel = samples.length === 1 ? 'real sample' : 'real samples';
+
+                buildAirQualityLayers(samples);
+                applyPendingAirLayers();
+            });
         })
         .catch(function(error) {
             var message = 'Air-quality station data could not be loaded.';

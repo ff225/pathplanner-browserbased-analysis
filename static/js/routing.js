@@ -81,40 +81,49 @@ document.addEventListener("DOMContentLoaded", function() {
     
     var preferenceSet = document.getElementById('preferenceSet');
     var patientConditionSelect = document.getElementById('patientCondition');
+    var transportModeSelect = document.getElementById('transportMode');
+    var percentageSliderControl = document.getElementById('percentageSlider');
+
+    async function applyPatientConditionSelection(showToast = true) {
+        if (!patientConditionSelect) return;
+
+        const selectedConditionValue = patientConditionSelect.value;
+        console.log(`[routing.js] Patient condition dropdown changed to: ${selectedConditionValue}`);
+
+        const patientConditionObject = await PatientConditions.getPatientCondition(preferenceSet, window.currentPreferences, patientConditionSelect, window.currentPatientCondition);
+
+        if (patientConditionObject) {
+            await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, patientConditionObject);
+            console.log("[routing.js] window.currentPatientCondition AFTER selection change:", JSON.stringify(window.currentPatientCondition, null, 2));
+            if (showToast) {
+                toastr.info(`Patient condition set to: ${window.currentPatientCondition.name} (AQ Sensitivity: ${window.currentPatientCondition.airQualitySensitivity}, Slope Sensitivity: ${window.currentPatientCondition.slopeSensitivity})`);
+            }
+        } else if (selectedConditionValue === "default" || selectedConditionValue === "none") {
+            await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, PatientConditions.DEFAULT);
+            console.log("[routing.js] window.currentPatientCondition set to DEFAULT due to selection:", JSON.stringify(window.currentPatientCondition, null, 2));
+            if (showToast) {
+                toastr.info(`Patient mode deactivated. Using default preferences.`);
+            }
+        } else {
+            console.warn("[routing.js] getPatientCondition did not return a valid object for value:", selectedConditionValue);
+            await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, PatientConditions.DEFAULT);
+            console.log("[routing.js] window.currentPatientCondition FALLBACK to DEFAULT:", JSON.stringify(window.currentPatientCondition, null, 2));
+        }
+    }
 
     if (preferenceSet) {
         preferenceSet.addEventListener('change', async function() {
             const preferences = await Preferences.getPreferences(this.value);
             await Preferences.setCurrentPreferences(currentPreferences, preferences);
+            window.PathPlannerMapState?.saveValue('preferenceSet', this.value);
             console.log("[routing.js] Preferences updated:", JSON.stringify(currentPreferences, null, 2));
         });
     }
 
     if (patientConditionSelect) {
         patientConditionSelect.addEventListener('change', async function() {
-            const selectedConditionValue = this.value;
-            console.log(`[routing.js] Patient condition dropdown changed to: ${selectedConditionValue}`);
-            
-            // getPatientCondition expects the global currentPatientCondition to be passed to be potentially modified
-            // if "none" is selected. It returns the new condition object.
-            const patientConditionObject = await PatientConditions.getPatientCondition(preferenceSet, window.currentPreferences, this, window.currentPatientCondition);
-            
-            if (patientConditionObject) { 
-                // setCurrentPatientCondition updates the first argument (the global one)
-                await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, patientConditionObject);
-                console.log("[routing.js] window.currentPatientCondition AFTER selection change:", JSON.stringify(window.currentPatientCondition, null, 2));
-                toastr.info(`Patient condition set to: ${window.currentPatientCondition.name} (AQ Sensitivity: ${window.currentPatientCondition.airQualitySensitivity}, Slope Sensitivity: ${window.currentPatientCondition.slopeSensitivity})`);
-            } else if (selectedConditionValue === "default" || selectedConditionValue === "none") {
-                // This case should be handled by getPatientCondition which would reset currentPatientCondition to DEFAULT
-                // and return it. If it returns null/undefined, we ensure DEFAULT is set.
-                await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, PatientConditions.DEFAULT);
-                console.log("[routing.js] window.currentPatientCondition set to DEFAULT due to selection:", JSON.stringify(window.currentPatientCondition, null, 2));
-                toastr.info(`Patient mode deactivated. Using default preferences.`);
-            } else {
-                console.warn("[routing.js] getPatientCondition did not return a valid object for value:", selectedConditionValue);
-                await PatientConditions.setCurrentPatientCondition(window.currentPatientCondition, PatientConditions.DEFAULT);
-                console.log("[routing.js] window.currentPatientCondition FALLBACK to DEFAULT:", JSON.stringify(window.currentPatientCondition, null, 2));
-            }
+            window.PathPlannerMapState?.saveValue('patientCondition', this.value);
+            await applyPatientConditionSelection();
         });
     }
 
@@ -280,7 +289,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
     
     document.getElementById('cancelButton').addEventListener('click', function() {
-        // Don't clear csvData on cancel - just reload the page
+        window.PathPlannerMapState?.clear();
         window.location.reload();
     });
 
@@ -317,8 +326,50 @@ document.addEventListener("DOMContentLoaded", function() {
             } catch (e) {
                 /* localStorage unavailable: in-memory state still applies for this session */
             }
+            window.PathPlannerMapState?.saveValue('legacyMode', legacyToggle.checked);
         });
     }
+
+    async function restorePersistedControls() {
+        const state = window.PathPlannerMapState;
+        if (!state) return;
+
+        state.restoreValue('transportMode', transportModeSelect);
+        state.restoreValue('percentageSlider', percentageSliderControl);
+        state.restoreValue('legacyMode', legacyToggle);
+
+        const useAStarAlgorithm = document.getElementById('useAStarAlgorithm');
+        state.restoreValue('useAStarAlgorithm', useAStarAlgorithm);
+
+        if (percentageSliderControl) {
+            const percentageValue = document.getElementById('percentageValue');
+            if (percentageValue) {
+                percentageValue.textContent = `x${percentageSliderControl.value}`;
+            }
+        }
+
+        let patientRestored = false;
+        if (patientConditionSelect) {
+            patientRestored = state.restoreValue('patientCondition', patientConditionSelect);
+            if (patientRestored) {
+                await applyPatientConditionSelection(false);
+            }
+        }
+
+        if ((!patientRestored || patientConditionSelect?.value === 'none') && preferenceSet) {
+            if (state.restoreValue('preferenceSet', preferenceSet)) {
+                const preferences = await Preferences.getPreferences(preferenceSet.value);
+                await Preferences.setCurrentPreferences(currentPreferences, preferences);
+                preferenceSet.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }
+
+        state.bindValue('transportMode', transportModeSelect);
+        state.bindValue('percentageSlider', percentageSliderControl, 'input');
+        state.bindValue('useAStarAlgorithm', useAStarAlgorithm);
+    }
+
+    restorePersistedControls();
 
     document.getElementById('searchButton').addEventListener('click', async function() {
         const startPoint = document.getElementById('startPoint');
@@ -458,9 +509,5 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
-    // dynamic import without top-level await to satisfy older browsers
-    import('./data/envTileIndex.js')
-        .then(mod => mod.initEnvIndex())
-        .then(() => console.log('[routing.js] Environmental tile index loaded'))
-        .catch(err => console.warn('[routing.js] Could not load environmental tile index:', err.message));
+    console.log('[routing.js] Real-only routing active; synthetic/static environmental tiles are not loaded for A* selection.');
 });

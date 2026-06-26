@@ -6,7 +6,12 @@ from .models import Stazione, Misurazione
 from .utils import calculate_route  # Assuming you have a utility function for route calculation
 from .air_quality_service import air_quality_service
 from .pollen_service import get_pollen_data
-from .environmental_data_service import environmental_data_service, fetch_named_pois, POI_CATEGORIES
+from .environmental_data_service import (
+    environmental_data_service,
+    fetch_named_pois,
+    fetch_street_graph,
+    POI_CATEGORIES,
+)
 from .real_environment_service import build_environment_payload
 from .multifactor_scoring import calculate_multifactor_score
 from .route_waypoints import generate_condition_waypoints
@@ -701,6 +706,35 @@ def get_pois_in_bbox(request):
         return JsonResponse({'error': str(exc)}, status=400)
     except Exception:
         return JsonResponse({'error': 'pois lookup failed'}, status=500)
+
+
+def get_street_graph(request):
+    """Real OSM street graph inside a route corridor bbox.
+
+    GET /api/street_graph?mode=walking|cycling|car&min_lat=..&min_lon=..&max_lat=..&max_lon=..
+    Returns only genuine OpenStreetMap ways/nodes; never a generated grid.
+    """
+    try:
+        min_lat = float(request.GET.get('min_lat'))
+        min_lon = float(request.GET.get('min_lon'))
+        max_lat = float(request.GET.get('max_lat'))
+        max_lon = float(request.GET.get('max_lon'))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'min_lat, min_lon, max_lat, max_lon must be numbers'}, status=400)
+
+    try:
+        payload = fetch_street_graph(
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+            request.GET.get('mode', 'walking'),
+        )
+        return JsonResponse(payload)
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=400)
+    except Exception:
+        return JsonResponse({'error': 'street graph lookup failed'}, status=500)
 
 
 def get_pollen(request):

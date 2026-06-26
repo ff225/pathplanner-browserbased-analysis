@@ -748,7 +748,8 @@ function syncRouteComparisonLabels(routes) {
 
 /**
  * Compute the environmental-data provenance badge for a route.
- * Synthetic fallback must never be shown with the green REAL state.
+ * Only real environmental samples count. Missing values are shown as unavailable,
+ * never replaced with synthetic fallback data.
  */
 function getRouteEnvDataBadge(route) {
     if (!route || route.isDirectRoute) {
@@ -780,18 +781,17 @@ function getRouteEnvDataBadge(route) {
     const clampedPct = Math.min(100, Math.max(0, realPct));
     if (clampedPct > 0) {
         const realDisplayPct = Math.min(99, Math.max(1, Math.round(clampedPct)));
-        const syntheticDisplayPct = 100 - realDisplayPct;
         return {
             cssClass: 'env-real-badge--synthetic',
-            label: `MIXED ${realDisplayPct}% REAL · ${syntheticDisplayPct}% SYNTH`,
-            title: `${realDisplayPct}% real environmental data from /api/environment; ${syntheticDisplayPct}% synthetic fallback.`
+            label: `REAL ${realDisplayPct}%`,
+            title: `${realDisplayPct}% real environmental data from /api/environment; remaining samples are unavailable.`
         };
     }
 
     return {
         cssClass: 'env-real-badge--synthetic',
-        label: 'SYNTHETIC',
-        title: 'Real environmental data was unavailable for this route; values are synthetic fallback data.'
+        label: 'NO REAL ENV',
+        title: 'Real environmental data was unavailable for this route; no synthetic values are shown.'
     };
 }
 
@@ -1859,13 +1859,10 @@ function deduplicateRoutesForComparison(routes, map, currentRouting, options = {
     return routes;
 }
 
-// TODO1: keep only routes computed on REAL environmental data (real air-quality /
-// pollen station data). Optimized routes whose env data is 100% synthetic
-// (realDataPercentage === 0) are hidden so the user never compares routes that were
-// "optimized" on fabricated data. Direct/reference routes are exempt (they are not
-// optimized on env data). The panel is NEVER emptied: if no real-data optimized
-// route survives (e.g. the env APIs were unreachable for this run) the original set
-// is kept untouched — the per-route SYNTHETIC badge already signals provenance.
+// Keep only routes computed on REAL environmental data. Optimized routes with no
+// real environmental samples are hidden so the user never compares alternatives
+// that were "optimized" on unavailable/fabricated data. Direct/reference routes
+// are exempt because they are not environmental recommendations.
 // Mutates `routes` in place (mirroring deduplicateRoutesForComparison) so the
 // caller's array and the rendered card indices stay in sync.
 function filterRoutesToRealData(routes, map, currentRouting) {
@@ -1882,12 +1879,6 @@ function filterRoutesToRealData(routes, map, currentRouting) {
     };
 
     const kept = routes.filter(isRealDataRoute);
-    const keptOptimizedReal = kept.some(route => !route.isDirectRoute);
-
-    // Never degrade to an empty or direct-only panel.
-    if (kept.length === 0 || !keptOptimizedReal) {
-        return routes;
-    }
 
     const dropped = routes.filter(route => !kept.includes(route));
     if (dropped.length === 0) {
@@ -1901,7 +1892,7 @@ function filterRoutesToRealData(routes, map, currentRouting) {
 
     routes.splice(0, routes.length, ...kept);
     console.info(
-        `[filterRoutesToRealData] Hid ${dropped.length} synthetic-only route(s); ` +
+        `[filterRoutesToRealData] Hid ${dropped.length} route(s) without real environmental data; ` +
         `showing ${routes.length} route(s) computed on real environmental data.`
     );
     return routes;
@@ -4400,32 +4391,10 @@ async function routeWithPrecalculatedRoutes(
             // DO NOT add to map here. setupRouteControlPanel will handle it.
             // DO NOT push to currentRouting.routingControls here. setupRouteControlPanel will handle it.
 
-            // Generate synthetic environmental data if not present
-            let environmentDataList = [];
-
-            // If we're missing environmental data, create synthetic data
-            if (!route.environmentDataList || route.environmentDataList.length === 0) {
-                console.log(`[routeWithPrecalculatedRoutes] Generating synthetic environmental data for route ${i+1}`);
-
-                // PP-PREVIEW-REGR-FIX: previously called the non-exported,
-                // single-point createLocationBasedEnvironmentalData(lat,lon,cond)
-                // with a (coordsArray, 20) signature → ReferenceError that aborted
-                // the whole panel. Use the qualified list generator (returns an array
-                // of points, each flagged isSynthetic:true — no fabricated data shown
-                // as real).
-                environmentDataList = Environmental.createSyntheticEnvironmentalDataList(
-                    route.coordinates || [
-                        { lat: waypointInputs.start.lat, lng: waypointInputs.start.lon },
-                        { lat: waypointInputs.end.lat, lng: waypointInputs.end.lon }
-                    ],
-                    20, // Generate up to 20 data points along the route
-                    currentPatientCondition
-                );
-            } else {
-                // Use existing environmental data
-                environmentDataList = route.environmentDataList;
-                console.log(`[routeWithPrecalculatedRoutes] Using existing environmental data for route ${i+1}: ${environmentDataList.length} points`);
-            }
+            const environmentDataList = Array.isArray(route.environmentDataList)
+                ? route.environmentDataList.filter(point => point && !point.isDefault && !point.isSynthetic && !point.isEnhanced)
+                : [];
+            console.log(`[routeWithPrecalculatedRoutes] Using ${environmentDataList.length} real environmental point(s) for route ${i+1}`);
 
             // Normalize the environment score to a 0-10 scale
             // Default to 5.0 if score is invalid (Infinity, NaN, etc.)

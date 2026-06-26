@@ -23,10 +23,10 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'temperatureSensitivity': 8,
         'humiditySensitivity': 9,
         'patientNature': 10,
-        'patientEntertainment': 3,
-        'patientNightlife': 0,
-        'patientTourism': 2,
-        'patientHospital': 8,
+        'patientEntertainment': 0,
+        'patientNightlife': -4,
+        'patientTourism': 0,
+        'patientHospital': 6,
     },
     'cardiac': {
         'name': 'cardiac',
@@ -35,10 +35,10 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 4,
         'temperatureSensitivity': 8,
         'humiditySensitivity': 5,
-        'patientNature': 7,
-        'patientEntertainment': 2,
-        'patientNightlife': 0,
-        'patientTourism': 2,
+        'patientNature': 5,
+        'patientEntertainment': 0,
+        'patientNightlife': -3,
+        'patientTourism': 0,
         'patientHospital': 10,
     },
     'mobility': {
@@ -48,11 +48,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 2,
         'temperatureSensitivity': 3,
         'humiditySensitivity': 3,
-        'patientNature': 4,
-        'patientEntertainment': 3,
-        'patientNightlife': 1,
-        'patientTourism': 2,
-        'patientHospital': 7,
+        'patientNature': 3,
+        'patientEntertainment': 0,
+        'patientNightlife': -2,
+        'patientTourism': 0,
+        'patientHospital': 5,
     },
     'mental': {
         'name': 'mental',
@@ -62,9 +62,9 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'temperatureSensitivity': 4,
         'humiditySensitivity': 2,
         'patientNature': 10,
-        'patientEntertainment': 7,
-        'patientNightlife': 2,
-        'patientTourism': 5,
+        'patientEntertainment': 2,
+        'patientNightlife': -3,
+        'patientTourism': 3,
         'patientHospital': 4,
     },
     'arthritis': {
@@ -75,10 +75,10 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'temperatureSensitivity': 9,
         'humiditySensitivity': 10,
         'patientNature': 3,
-        'patientEntertainment': 4,
-        'patientNightlife': 1,
-        'patientTourism': 2,
-        'patientHospital': 6,
+        'patientEntertainment': 0,
+        'patientNightlife': -2,
+        'patientTourism': 0,
+        'patientHospital': 5,
     },
     'diabetes': {
         'name': 'diabetes',
@@ -87,11 +87,11 @@ PATIENT_CONDITIONS: Dict[str, Dict[str, Any]] = {
         'noiseSensitivity': 3,
         'temperatureSensitivity': 5,
         'humiditySensitivity': 4,
-        'patientNature': 6,
-        'patientEntertainment': 4,
-        'patientNightlife': 0,
-        'patientTourism': 3,
-        'patientHospital': 9,
+        'patientNature': 5,
+        'patientEntertainment': 0,
+        'patientNightlife': -2,
+        'patientTourism': 0,
+        'patientHospital': 8,
     },
     'default': {
         'name': 'default',
@@ -362,9 +362,13 @@ def precompute_poi_distances(
 
 
 def apply_preference_poi_adjustment(cost: float, weight: float, distance_m: Optional[float]) -> float:
-    """Reward positive weights for closeness to POIs; penalize for negative weights."""
+    """Positive weights prefer closeness; negative weights penalize closeness."""
     if weight and distance_m is not None and distance_m >= 0:
-        cost += -weight * PREFERENCE_POI_SCALE * math.exp(-distance_m / PREFERENCE_POI_DECAY_M)
+        closeness = math.exp(-distance_m / PREFERENCE_POI_DECAY_M)
+        if weight > 0:
+            cost += abs(weight) * PREFERENCE_POI_SCALE * (1.0 - closeness)
+        else:
+            cost += abs(weight) * PREFERENCE_POI_SCALE * closeness
     return cost
 
 

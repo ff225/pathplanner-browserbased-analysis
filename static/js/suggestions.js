@@ -62,12 +62,24 @@ document.addEventListener("DOMContentLoaded", function() {
     function setInputCoordinates(input, latitude, longitude) {
         input.dataset.lat = String(latitude);
         input.dataset.lon = String(longitude);
+        persistInput(input);
         input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function clearInputCoordinates(input) {
         delete input.dataset.lat;
         delete input.dataset.lon;
+        persistInput(input);
+    }
+
+    function persistInput(input) {
+        const state = window.PathPlannerMapState;
+        if (!state) return;
+        if (input === startPointInput) {
+            state.savePoint('startPoint', input);
+        } else if (input === endPointInput) {
+            state.savePoint('endPoint', input);
+        }
     }
 
     function hideSuggestions(container) {

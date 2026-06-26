@@ -159,6 +159,97 @@ function buildMapboxWaypointSignature(routePoints, precision = 4) {
         .join('|');
 }
 
+function appendPreferenceParams(params, preferences) {
+    if (!preferences) return;
+    ['nature', 'entertainment', 'nightlife', 'tourism', 'hospital'].forEach((key) => {
+        if (preferences[key] !== undefined && preferences[key] !== null) {
+            params.set(key, preferences[key]);
+        }
+    });
+}
+
+async function fetchBackendAstarRoutes(
+    startPoint,
+    endPoint,
+    patientCondition,
+    transportMode,
+    numRoutes,
+    preferences,
+    distanceTolerance,
+) {
+    const params = new URLSearchParams({
+        start: `${startPoint.lat},${startPoint.lon}`,
+        end: `${endPoint.lat},${endPoint.lon}`,
+        condition: patientCondition?.name || 'respiratory',
+        transport_mode: transportMode || 'walking',
+        distance_tolerance: distanceTolerance || 1,
+        alternatives: numRoutes || 3,
+    });
+    appendPreferenceParams(params, preferences);
+
+    const response = await fetch(`/api/backend_astar/?${params.toString()}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(payload.error || `backend A* failed (${response.status})`);
+    }
+    if (!payload || !Array.isArray(payload.routes)) {
+        throw new Error('backend A* returned an invalid payload');
+    }
+    return payload;
+}
+
+function convertBackendAstarRoutesToPlannerFormat(payload, patientCondition, transportMode) {
+    const routes = [];
+    const acceptedWaypointSignatures = new Set();
+    const backendRoutes = Array.isArray(payload?.routes) ? payload.routes : [];
+
+    backendRoutes.forEach((route, index) => {
+        const routePoints = (Array.isArray(route.waypoints) && route.waypoints.length >= 2)
+            ? route.waypoints
+            : route.path;
+        if (!Array.isArray(routePoints) || routePoints.length < 2) {
+            return;
+        }
+
+        const waypointSignature = buildMapboxWaypointSignature(routePoints);
+        if (waypointSignature && acceptedWaypointSignatures.has(waypointSignature)) {
+            console.info(`[RoutePlanner] Skipping duplicate backend A* route before render (${waypointSignature}).`);
+            return;
+        }
+        if (waypointSignature) {
+            acceptedWaypointSignatures.add(waypointSignature);
+        }
+
+        const pathLength = calculateRouteLength(route.path || routePoints);
+        routes.push({
+            name: index === 0
+                ? `Backend Environmental A* Route`
+                : `Backend Environmental A* Alternative ${index + 1}`,
+            description:
+                `Backend OSM street-graph A* ` +
+                `(${route.path_node_count || routePoints.length} nodes, ${payload.timing_ms || '?'} ms)`,
+            waypoints: routePoints.map((p) => L.latLng(p.lat, p.lon)),
+            environmentalScore: Number.isFinite(route.astar_cost) ? route.astar_cost : index,
+            coordinates: routePoints.map((p) => ({ lat: p.lat, lng: p.lon })),
+            environmentDataList: [],
+            transportMode: route.transport_mode || transportMode,
+            length: pathLength,
+            realDataPercentage: 100,
+            dataSourceInfo: route.data_sources || {},
+            routingEngine: 'backend_environmental_astar',
+            astarRoutingBasis: route.routing_basis || 'street_graph',
+            astarInternalCost: route.astar_cost,
+            astarPathNodeCount: route.path_node_count,
+            backendEnvScore: route.env_score,
+            backendTimingMs: payload.timing_ms,
+            backendParallelism: payload.parallelism,
+            astarAlternativeSignature: route.signature || `backend-astar-${index}`,
+        });
+    });
+
+    return routes;
+}
+
 async function convertAstarRoutesToPlannerFormat(astarRoutes, patientCondition, transportMode, startPoint = null, endPoint = null) {
     const routes = [];
     const acceptedWaypointSignatures = new Set();
@@ -368,39 +459,74 @@ export async function generateOptimizedRoutes(
                         ? window.BENCHMARK_ASTAR_NUM_ROUTES
                         : numRoutes;
 
+                let routes = [];
+                const useBackendAStar =
+                    options.backendAStar !== false &&
+                    window.PATHPLANNER_USE_FRONTEND_ASTAR !== true;
+
+                if (useBackendAStar) {
+                    try {
+                        const backendPayload = await withTimeout(
+                            fetchBackendAstarRoutes(
+                                startPoint,
+                                endPoint,
+                                patientCondition,
+                                transportMode,
+                                astarRouteCount,
+                                preferences,
+                                distanceTolerance,
+                            ),
+                            astarMs,
+                            'Backend Environmental A*'
+                        );
+                        routes = convertBackendAstarRoutesToPlannerFormat(
+                            backendPayload,
+                            patientCondition,
+                            transportMode
+                        );
+                        if (routes.length > 0) {
+                            console.info(`[RoutePlanner] Backend A* produced ${routes.length} route(s).`);
+                        }
+                    } catch (backendError) {
+                        console.warn('[RoutePlanner] Backend A* unavailable; falling back to browser A*:', backendError);
+                    }
+                }
+
                 // Real-only routing: seed A* with real /api/environment samples
                 // before path selection. If real samples are slow or unavailable,
                 // A* continues without synthetic environmental values; real POIs
                 // can still influence the route when they are available.
-                EnvironmentalAStar.clearRealEnvTiles();
-                await prefetchRealEnvForSelection(
-                    startPoint,
-                    endPoint,
-                    patientCondition
-                );
-
-                const astarRoutes = await withTimeout(
-                    EnvironmentalAStar.generateAlternativeRoutes(
+                if (routes.length === 0) {
+                    EnvironmentalAStar.clearRealEnvTiles();
+                    await prefetchRealEnvForSelection(
                         startPoint,
                         endPoint,
-                        map,
                         patientCondition,
-                        astarRouteCount,
-                        preferences,
-                        distanceTolerance,
-                        transportMode,
-                    ),
-                    astarMs,
-                    'Environmental A*'
-                );
+                    );
 
-                const routes = await convertAstarRoutesToPlannerFormat(
-                    astarRoutes,
-                    patientCondition,
-                    transportMode,
-                    startPoint,
-                    endPoint
-                );
+                    const astarRoutes = await withTimeout(
+                        EnvironmentalAStar.generateAlternativeRoutes(
+                            startPoint,
+                            endPoint,
+                            map,
+                            patientCondition,
+                            astarRouteCount,
+                            preferences,
+                            distanceTolerance,
+                            transportMode,
+                        ),
+                        astarMs,
+                        'Environmental A*'
+                    );
+
+                    routes = await convertAstarRoutesToPlannerFormat(
+                        astarRoutes,
+                        patientCondition,
+                        transportMode,
+                        startPoint,
+                        endPoint
+                    );
+                }
 
                 if (routes.length > 0) {
                     let merged = [...routes];

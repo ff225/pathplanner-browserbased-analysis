@@ -16,6 +16,7 @@ from .real_environment_service import build_environment_payload
 from .multifactor_scoring import calculate_multifactor_score
 from .route_waypoints import generate_condition_waypoints
 from .environmental_astar import find_optimal_route, simplify_path_for_routing, score_path_multifactor
+from .backend_astar import generate_backend_astar_routes
 from .detour_limits import select_best_within_detour_policy, detour_metres, MAX_DETOUR_M, BETTER_SCORE_ENV_TOLERANCE_M
 import os, time, requests, json, math
 from functools import lru_cache
@@ -314,6 +315,58 @@ def astar_route(request):
     if 'error' in result:
         return JsonResponse(result, status=400)
     return JsonResponse(result)
+
+
+def backend_astar_route(request):
+    """
+    Production-oriented backend Environmental A* on real OSM street graph.
+
+    GET params:
+      start=lat,lon
+      end=lat,lon
+      condition=respiratory|cardiac|...
+      transport_mode=walking|cycling|driving|car
+      distance_tolerance=1..10
+      alternatives=1..5
+    """
+    start_location = request.GET.get('start')
+    end_location = request.GET.get('end')
+    if not (start_location and end_location):
+        return JsonResponse({'error': 'start and end params required'}, status=400)
+    parsed = _parse_lat_lon_pair(start_location, end_location)
+    if not parsed:
+        return JsonResponse({'error': 'invalid coordinates'}, status=400)
+    s_lat, s_lon, e_lat, e_lon = parsed
+
+    try:
+        distance_tolerance = float(request.GET.get('distance_tolerance', request.GET.get('percentage', 1)))
+    except (TypeError, ValueError):
+        distance_tolerance = 1.0
+    try:
+        alternatives = int(request.GET.get('alternatives', 3))
+    except (TypeError, ValueError):
+        alternatives = 3
+
+    try:
+        payload = generate_backend_astar_routes(
+            s_lat,
+            s_lon,
+            e_lat,
+            e_lon,
+            condition=request.GET.get('condition', 'respiratory'),
+            preferences=_extract_preferences(request),
+            distance_tolerance=distance_tolerance,
+            transport_mode=request.GET.get('transport_mode', request.GET.get('mode', 'walking')),
+            alternatives=alternatives,
+        )
+        return JsonResponse(payload)
+    except TimeoutError as exc:
+        return JsonResponse({'error': str(exc)}, status=504)
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=400)
+    except Exception as exc:
+        print(f'[backend_astar_route] failed: {exc}')
+        return JsonResponse({'error': 'backend astar route failed'}, status=500)
 
 
 def optimized_route(request):

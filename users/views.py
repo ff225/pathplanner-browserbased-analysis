@@ -10,6 +10,9 @@ from .forms import UserProfileForm, UserPreferencesForm
 from core.views import CustomRequired, AddItemView, EditItemView, DeleteItemView, UpdateView
 from django.views.generic import ListView
 from django.views.generic.edit import FormView
+from django.http import JsonResponse
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_GET
 
 # Class based view to manage user registration logics
 class SignupView(FormView):
@@ -104,16 +107,66 @@ class EditProfileView(LoginRequiredMixin, UpdateView):
         messages.success(self.request, self.success_message)
         return response
 
-    
+
+PREFERENCE_WEIGHT_FIELDS = ('nature', 'entertainment', 'nightlife', 'tourism', 'hospital')
+
+
+def safe_next_url(request):
+    next_url = request.POST.get('next') or request.GET.get('next')
+    if next_url and url_has_allowed_host_and_scheme(
+        next_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure()
+    ):
+        return next_url
+    return None
+
+
+class PreferenceReturnMixin:
+    def get_success_url(self):
+        return safe_next_url(self.request) or super().get_success_url()
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['next_url'] = safe_next_url(self.request) or reverse_lazy('users:profile')
+        return context
+
+
+class UserPreferenceQuerysetMixin:
+    def get_queryset(self):
+        return self.request.user.userprofile.preferences.all()
+
+
+@require_GET
+def preference_weights(request, userpreferences_id):
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'Authentication required'}, status=403)
+
+    try:
+        preference = request.user.userprofile.preferences.get(pk=userpreferences_id)
+    except (UserProfile.DoesNotExist, UserPreferences.DoesNotExist):
+        return JsonResponse({'error': 'Preference not found'}, status=404)
+
+    data = {
+        'id': preference.id,
+        'name': preference.name or '',
+    }
+    data.update({
+        field: float(getattr(preference, field))
+        for field in PREFERENCE_WEIGHT_FIELDS
+    })
+    return JsonResponse(data)
+
+
 # Class based view to add a preference set
-class AddSetView(AddItemView):
+class AddSetView(PreferenceReturnMixin, AddItemView):
     model = UserPreferences
     form_class = UserPreferencesForm
     template_name = 'add_preferences.html'
     success_message = 'Set successfully added!'
 
 # Class based view to modify a preference set
-class EditSetView(EditItemView):
+class EditSetView(PreferenceReturnMixin, UserPreferenceQuerysetMixin, EditItemView):
     model = UserPreferences
     form_class = UserPreferencesForm
     template_name = 'edit_preferences.html'
@@ -121,8 +174,13 @@ class EditSetView(EditItemView):
     pk_url_kwarg = 'userpreferences_id'
 
 # Class based view to delete a preference set
-class DeleteSetView(DeleteItemView):
+class DeleteSetView(PreferenceReturnMixin, UserPreferenceQuerysetMixin, DeleteItemView):
     model = UserPreferences
     success_message = 'Set successfully eliminated!'
     pk_url_kwarg = 'userpreferences_id'
-    
+
+    def post(self, *args, **kwargs):
+        obj = self.get_object()
+        obj.delete()
+        messages.success(self.request, self.success_message)
+        return redirect(self.get_success_url())

@@ -79,19 +79,32 @@
                     </div>
                     <div class="control-block" id="preferenceSetBlock">
                         <label for="preferenceSet" class="form-label"><strong>Preferences</strong></label>
-                        <select class="form-select" id="preferenceSet" {% if not user_preferences %}disabled{% endif %}>
+                        <select
+                            class="form-select"
+                            id="preferenceSet"
+                            data-weights-url-template="{% url 'users:preference_weights' 0 %}"
+                            {% if not user_preferences %}disabled{% endif %}
+                        >
                             {% if user_preferences %}
                                 <option selected>Choose preferences...</option>
                                 {% for preference in user_preferences %}
-                                    <option value="{{ preference.id }}">{{ preference.name }}</option>
+                                    <option
+                                        value="{{ preference.id }}"
+                                        data-edit-url="{% url 'users:edit_set' preference.id %}?next={% url 'map' %}"
+                                        data-delete-url="{% url 'users:delete_set' preference.id %}"
+                                    >
+                                        {{ preference.name }}
+                                    </option>
                                 {% endfor %}
                             {% else %}
                                 <option selected>No saved preferences</option>
                             {% endif %}
                         </select>
-                        {% if not user_preferences %}
-                            <a href="{% url 'users:add_set' %}" class="btn btn-sm btn-outline-primary mt-2 w-100">Create preferences</a>
-                        {% endif %}
+                        <div class="preference-actions btn-group w-100 mt-2" role="group" aria-label="Preference actions">
+                            <a href="{% url 'users:add_set' %}?next={% url 'map' %}" class="btn btn-sm btn-outline-primary">Add</a>
+                            <a id="preferenceEditLink" href="#" class="btn btn-sm btn-outline-primary disabled" aria-disabled="true">Edit</a>
+                            <button id="preferenceDeleteButton" type="submit" form="preferenceDeleteForm" class="btn btn-sm btn-outline-danger" disabled>Delete</button>
+                        </div>
                     </div>
                     <section class="patient-card" aria-labelledby="patientConditionLabel">
                         <label class="patient-title" id="patientConditionLabel" for="patientCondition">
@@ -134,6 +147,10 @@
                         </button>
                     </div>
                 </form>
+                    <form id="preferenceDeleteForm" method="post" action="">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{% url 'map' %}">
+                    </form>
                 <hr class="sidebar-divider">
                 <div class="control-block layer-block">
                     <label class="form-label"><strong>Layers</strong></label>

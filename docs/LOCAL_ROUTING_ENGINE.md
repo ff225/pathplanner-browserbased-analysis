@@ -105,6 +105,14 @@ For faster route-scoring imports, skip walkability features:
   --poi-only
 ```
 
+If a DB already exists, refresh its SQLite bbox indexes without reading the PBF:
+
+```bash
+.venv/bin/python scripts/build_local_osm_pois.py \
+  --db runtime/local_osm_pois/italy.sqlite3 \
+  --optimize-only
+```
+
 Then point the app at that explicit database:
 
 ```env

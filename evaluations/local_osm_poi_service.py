@@ -22,6 +22,32 @@ _DEFAULT_DB_CANDIDATES = (
     _PROJECT_ROOT / 'runtime' / 'local_osm_pois' / 'italy.sqlite3',
 )
 
+_LOCAL_OSM_DROP_INDEX_SQL = """
+DROP INDEX IF EXISTS idx_poi_category_bbox;
+DROP INDEX IF EXISTS idx_walkability_category_bbox;
+DROP INDEX IF EXISTS idx_poi_category_lat_lon_cover;
+DROP INDEX IF EXISTS idx_poi_category_lon_lat_cover;
+DROP INDEX IF EXISTS idx_walkability_category_lat_lon_cover;
+DROP INDEX IF EXISTS idx_walkability_category_lon_lat_cover;
+DROP INDEX IF EXISTS idx_walkability_lat_lon_cover;
+DROP INDEX IF EXISTS idx_walkability_lon_lat_cover;
+"""
+
+_LOCAL_OSM_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_poi_category_lat_lon_cover
+    ON poi(category, lat, lon, name, kind, id);
+CREATE INDEX IF NOT EXISTS idx_poi_category_lon_lat_cover
+    ON poi(category, lon, lat, name, kind, id);
+CREATE INDEX IF NOT EXISTS idx_walkability_category_lat_lon_cover
+    ON walkability_feature(category, lat, lon, name, kind, id);
+CREATE INDEX IF NOT EXISTS idx_walkability_category_lon_lat_cover
+    ON walkability_feature(category, lon, lat, name, kind, id);
+CREATE INDEX IF NOT EXISTS idx_walkability_lat_lon_cover
+    ON walkability_feature(lat, lon, category, name, kind, id);
+CREATE INDEX IF NOT EXISTS idx_walkability_lon_lat_cover
+    ON walkability_feature(lon, lat, category, name, kind, id);
+"""
+
 
 def local_osm_db_path() -> Optional[Path]:
     configured = (os.getenv('LOCAL_OSM_POI_DB') or '').strip()
@@ -69,8 +95,6 @@ def init_db(db_path: Path) -> None:
                 lon REAL NOT NULL,
                 tags TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_poi_category_bbox
-                ON poi(category, lat, lon);
 
             CREATE TABLE IF NOT EXISTS walkability_feature (
                 id TEXT PRIMARY KEY,
@@ -83,8 +107,6 @@ def init_db(db_path: Path) -> None:
                 lon REAL NOT NULL,
                 tags TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_walkability_category_bbox
-                ON walkability_feature(category, lat, lon);
 
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
@@ -92,6 +114,44 @@ def init_db(db_path: Path) -> None:
             );
             """
         )
+
+
+def optimize_local_osm_db(db_path: Path) -> Dict[str, Any]:
+    """Create query indexes and finalize a local OSM SQLite database."""
+    db_path = Path(db_path)
+    started = time.perf_counter()
+    if not db_path.exists():
+        raise FileNotFoundError(db_path)
+    with _connect(db_path) as conn:
+        conn.executescript(_LOCAL_OSM_DROP_INDEX_SQL)
+        conn.executescript(_LOCAL_OSM_INDEX_SQL)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('optimized_at', ?)",
+            (time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),),
+        )
+        conn.commit()
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        try:
+            conn.execute('PRAGMA journal_mode=DELETE')
+        except sqlite3.OperationalError:
+            pass
+        conn.execute('ANALYZE')
+        conn.execute('PRAGMA optimize')
+        counts = {
+            'poi': conn.execute('SELECT COUNT(*) FROM poi').fetchone()[0],
+            'walkability_feature': conn.execute(
+                'SELECT COUNT(*) FROM walkability_feature'
+            ).fetchone()[0],
+        }
+        index_count = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex%'"
+        ).fetchone()[0]
+    return {
+        'db_path': str(db_path),
+        'counts': counts,
+        'index_count': index_count,
+        'duration_s': round(time.perf_counter() - started, 2),
+    }
 
 
 def _tags(obj: Any) -> Dict[str, str]:
@@ -440,15 +500,13 @@ def build_local_osm_db(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('pbf_path', ?), ('built_at', ?)",
             (str(pbf_path), time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())),
         )
-        conn.commit()
-        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        conn.execute('PRAGMA journal_mode=DELETE')
-        conn.execute('PRAGMA optimize')
         counts = dict(handler.counts)
+    optimization = optimize_local_osm_db(db_path)
     return {
         'db_path': str(db_path),
         'pbf_path': str(pbf_path),
         'include_walkability': include_walkability,
         'counts': counts,
+        'indexes': optimization['index_count'],
         'duration_s': round(time.perf_counter() - started, 2),
     }

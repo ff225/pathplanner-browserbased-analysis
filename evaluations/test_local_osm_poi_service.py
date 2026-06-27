@@ -6,6 +6,7 @@ from evaluations.local_osm_poi_service import (
     fetch_local_named_pois,
     fetch_local_walkability_features,
     init_db,
+    optimize_local_osm_db,
 )
 
 
@@ -75,3 +76,22 @@ def test_fetch_local_walkability_features_returns_real_osm_tags(tmp_path):
     assert result['count'] == 1
     assert result['features'][0]['category'] == 'incline'
     assert result['features'][0]['kind'] == '8%'
+
+
+def test_optimize_local_osm_db_creates_bbox_indexes(tmp_path):
+    db_path = tmp_path / 'pois.sqlite3'
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        _insert_poi(conn, row_id='1', category='parks', name='Parco Test', kind='park', lat=44.0, lon=10.0)
+
+    result = optimize_local_osm_db(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list('poi')").fetchall()
+        }
+
+    assert result['counts']['poi'] == 1
+    assert 'idx_poi_category_lat_lon_cover' in indexes
+    assert 'idx_poi_category_lon_lat_cover' in indexes

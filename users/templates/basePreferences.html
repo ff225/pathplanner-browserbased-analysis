@@ -16,7 +16,10 @@
             <span>Unimore Maps</span>
         </a>
         <div class="preferences-header">
-            <h2 id="myTitle">{% block h %}{% endblock %}</h2>
+            <div>
+                <span class="preferences-kicker">Route style set</span>
+                <h2 id="myTitle">{% block h %}{% endblock %}</h2>
+            </div>
             <a href="{{ next_url }}" class="btn btn-secondary back-to-profile">
                 Back
             </a>
@@ -24,45 +27,52 @@
         <form method="POST" enctype="multipart/form-data">
             {% csrf_token %}
             <input type="hidden" name="next" value="{{ next_url }}">
-            <table class="preferences-table">
-                <thead>
-                    <tr>
-                        <th>Preference</th>
-                        <th>Value</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for field in form %}
-                        <tr>
-                            <td><label>{{ field.label }}</label></td>
-                            <td>
-                                {{ field }}
-                                <span id="{{ field.id_for_label }}_value" class="ml-2 slider-value"></span>
-                            </td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <p class="preferences-copy">Tune how strongly this preset should favor each kind of place. The clinical profile is applied separately on the map.</p>
+            {% for field in form %}
+                {% if field.name == 'name' %}
+                    <div class="preference-name-card">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.errors %}<div class="invalid-feedback d-block">{{ field.errors }}</div>{% endif %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+            <div class="preference-slider-grid">
+                {% for field in form %}
+                    {% if field.name != 'name' %}
+                    <div class="preference-slider-card">
+                        <div class="preference-slider-copy">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            <span id="{{ field.id_for_label }}_value" class="slider-value"></span>
+                        </div>
+                        {{ field }}
+                        {% if field.errors %}<div class="invalid-feedback d-block">{{ field.errors }}</div>{% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
             {% block action %}{% endblock %}
             {% block href %}{% endblock %}
         </form>
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', (event) => {
-            const comments = {
-                '-1': 'Strongly against',
-                '-0.5': 'Against',
-                '0': 'Neutral',
-                '0.5': 'In favor',
-                '1': 'Strongly in favor'
+            const labelForValue = (value) => {
+                const numeric = Number(value);
+                if (numeric === 0) return 'Neutral';
+                if (numeric <= 3) return 'Light focus';
+                if (numeric <= 6) return 'Moderate focus';
+                if (numeric <= 8) return 'Strong focus';
+                return 'Maximum focus';
             };
 
             document.querySelectorAll('input[type="range"]').forEach(slider => {
                 const updateValueAndComment = (slider) => {
-                    const value = slider.value;
-                    const comment = comments[value];
+                    const comment = labelForValue(slider.value);
                     const displaySpan = document.getElementById(`${slider.id}_value`);
-                    displaySpan.textContent = `${comment}`;
+                    if (displaySpan) {
+                        displaySpan.textContent = `${slider.value}/10 · ${comment}`;
+                    }
                 };
 
                 // Update the span initially

@@ -78,7 +78,8 @@
                         <input type="range" class="form-range" id="percentageSlider" min="1" max="10" step="0.5" value="1">
                     </div>
                     <div class="control-block" id="preferenceSetBlock">
-                        <label for="preferenceSet" class="form-label"><strong>Preferences</strong></label>
+                        <label for="preferenceSet" class="form-label"><strong>Route style</strong></label>
+                        <p class="form-hint">Choose a preset focus. Clinical mode can still adjust it for patient needs.</p>
                         <select
                             class="form-select"
                             id="preferenceSet"
@@ -107,10 +108,10 @@
                             {% endif %}
                         </select>
                         {% if user.is_authenticated %}
-                            <div class="preference-actions btn-group w-100 mt-2" role="group" aria-label="Preference actions">
-                                <a href="{% url 'users:add_set' %}?next={% url 'map' %}" class="btn btn-sm btn-outline-primary">Add</a>
-                                <a id="preferenceEditLink" href="#" class="btn btn-sm btn-outline-primary disabled" aria-disabled="true">Edit</a>
-                                <button id="preferenceDeleteButton" type="submit" form="preferenceDeleteForm" class="btn btn-sm btn-outline-danger" disabled>Delete</button>
+                            <div class="preference-actions" role="group" aria-label="Route style actions">
+                                <a href="{% url 'users:add_set' %}?next={% url 'map' %}" class="preference-action preference-action--primary">Add</a>
+                                <a id="preferenceEditLink" href="#" class="preference-action disabled" aria-disabled="true">Edit</a>
+                                <button id="preferenceDeleteButton" type="submit" form="preferenceDeleteForm" class="preference-action preference-action--danger" disabled>Delete</button>
                             </div>
                         {% endif %}
                     </div>
@@ -128,7 +129,7 @@
                             <option value="mobility" {% if default_pathology == 'mobility' %}selected{% endif %}>Limited mobility</option>
                             <option value="diabetes" {% if default_pathology == 'diabetes' %}selected{% endif %}>Diabetes</option>
                         </select>
-                        <p class="patient-helper" id="patientConditionHelp">Adds clinical weighting on top of the selected routing preset.</p>
+                        <p class="patient-helper" id="patientConditionHelp">Applies patient-aware weights while keeping the selected route style visible.</p>
                     </section>
                     <div class="route-actions">
                         <button id="searchButton" type="button" class="btn btn-route-primary">
@@ -174,7 +175,7 @@
                                 <img src="{% static 'img/profile_pictures/default_profile_picture.png' %}" alt="Default profile picture" width="47" height="47" class="rounded-circle">
                             {% endif %}
                             </span>
-                            <span>
+                            <span class="user-meta">
                                 <strong class="d-block">
                                     {% if user.is_authenticated %}
                                         {% firstof user.get_full_name user.username user.email "User" %}

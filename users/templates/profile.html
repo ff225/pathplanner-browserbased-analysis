@@ -21,18 +21,26 @@
         </div>
         <div class="profile-grid">
             <section class="profile-panel">
-                <h2>User profile</h2>
-                <div>
+                <div class="profile-panel-header">
+                    <div>
+                        <span class="profile-kicker">Account</span>
+                        <h2>User profile</h2>
+                    </div>
+                </div>
+                <div class="profile-summary">
                     {% if profile.profile_picture %}
                     <img src="{{ profile.profile_picture.url }}" alt="Profile picture" width="120" height="120" class="rounded-circle profile-avatar">
                     {% else %}
                     <img src="{% static 'img/profile_pictures/default_profile_picture.png' %}" alt="Default profile picture" width="120" height="120" class="rounded-circle profile-avatar">
                     {% endif %}
                     <div class="profile-details">
-                        <p><strong>Username: </strong> {{ profile.user.username }}</p>
-                        <p><strong>Name: </strong> {% firstof profile.first_name profile.user.first_name "-" %}</p>
-                        <p><strong>Surname: </strong> {% firstof profile.last_name profile.user.last_name "-" %}</p>
-                        <p><strong>Email: </strong> {% firstof profile.email profile.user.email "-" %}</p>
+                        <p class="profile-display-name">{% firstof profile.user.get_full_name profile.user.username %}</p>
+                        <dl class="profile-detail-list">
+                            <div><dt>Username</dt><dd>{{ profile.user.username }}</dd></div>
+                            <div><dt>Name</dt><dd>{% firstof profile.first_name profile.user.first_name "-" %}</dd></div>
+                            <div><dt>Surname</dt><dd>{% firstof profile.last_name profile.user.last_name "-" %}</dd></div>
+                            <div><dt>Email</dt><dd>{% firstof profile.email profile.user.email "-" %}</dd></div>
+                        </dl>
                     </div>
                 </div>
                 <div class="profile-actions">
@@ -40,7 +48,14 @@
                 </div>
             </section>
             <section class="profile-panel">
-                <h2>Saved routing sets</h2>
+                <div class="profile-panel-header">
+                    <div>
+                        <span class="profile-kicker">Route styles</span>
+                        <h2>Saved routing sets</h2>
+                    </div>
+                    <a id="creationbutton" href="{% url 'users:add_set' %}" class="btn btn-success">Create set</a>
+                </div>
+                <p class="profile-panel-copy">Saved sets are optional route-style presets. They can be combined with clinical routing when you want a personal focus such as parks, medical access, tourism or nightlife.</p>
                 <div>
                     <div class="preference-card-list">
                         {% for preference in object_list %}
@@ -66,13 +81,12 @@
                         {% empty %}
                         <div class="preference-empty">
                             <h3>No saved routing sets</h3>
-                            <p>You can still choose built-in preferences on the map. Saved sets are optional presets for logged-in users.</p>
+                            <p>You can still choose the built-in route styles on the map. Create a set only if you want a reusable personal mix.</p>
                         </div>
                         {% endfor %}
                     </div>
                     <div class="n_text my-3"> {{ page_obj.paginator.count }} routing set{{ page_obj.paginator.count|pluralize }} found | Page {{page_obj.number}} </div>
-                    <div class="d-flex justify-content-between align-items-center">
-                        <a id="creationbutton" href="{% url 'users:add_set' %}" class="btn btn-success">Create routing set</a>
+                    <div class="d-flex justify-content-end align-items-center">
                         <nav aria-label="Page navigation">
                             <ul class="pagination mb-0">
                                 {% if page_obj.has_previous %}

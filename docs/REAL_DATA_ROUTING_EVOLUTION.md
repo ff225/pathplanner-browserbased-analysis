@@ -1209,6 +1209,23 @@ static/js/services/routePlanner.js
   -> Open-Meteo/OpenAQ/OpenTopoData for remaining environment samples
 ```
 
+### Route Style Presets vs Clinical Profiles
+
+The map UI now keeps the preference presets, but presents them as route styles:
+
+- built-in route styles such as Balanced, Parks and green areas, Medical access,
+  Tourism, Entertainment, and Nightlife remain selectable by anonymous and
+  logged-in users;
+- logged-in users can still create, edit, and delete saved route-style sets;
+- the patient condition selector is a separate clinical weighting layer applied
+  on top of the selected route style;
+- signup now collects first name, last name, email, and default clinical
+  condition so new profiles are not empty on the map/profile screens.
+
+This avoids hiding useful demo controls while making the product meaning clearer:
+route styles describe a user's preferred route character, while clinical profiles
+describe health-aware constraints.
+
 ## Why This Is Better
 
 This architecture is better for the app because:

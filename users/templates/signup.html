@@ -9,6 +9,49 @@ Signup
 Signup
 {%endblock%}
 
+{% block lead %}
+<p class="form-lead">Create your account with the details used by the map profile and clinical routing defaults.</p>
+{% endblock %}
+
+{% block form_content %}
+<section class="form-section">
+    <h3 class="form-section-title">Account</h3>
+    {{ form.username|as_crispy_field }}
+    <div class="form-row">
+        <div class="form-col">
+            {{ form.first_name|as_crispy_field }}
+        </div>
+        <div class="form-col">
+            {{ form.last_name|as_crispy_field }}
+        </div>
+    </div>
+    {{ form.email|as_crispy_field }}
+</section>
+<section class="form-section">
+    <h3 class="form-section-title">Clinical default</h3>
+    <div class="clinical-options">
+        <label class="form-label">{{ form.default_pathology.label }}</label>
+        <div class="clinical-options-grid">
+            {% for choice in form.default_pathology %}
+            <div class="clinical-option">
+                {{ choice.tag }}
+                <label for="{{ choice.id_for_label }}" class="clinical-option-label">{{ choice.choice_label }}</label>
+            </div>
+            {% endfor %}
+        </div>
+        {% if form.default_pathology.errors %}
+        <div class="invalid-feedback d-block">{{ form.default_pathology.errors }}</div>
+        {% endif %}
+        <div class="form-text">{{ form.default_pathology.help_text }}</div>
+    </div>
+</section>
+<section class="form-section">
+    <h3 class="form-section-title">Password</h3>
+    {{ form.password1|as_crispy_field }}
+    {{ form.password2|as_crispy_field }}
+</section>
+{% endblock %}
+
 {%block action%}
 <div class="form-actions">
 <button id="actionButton" type="submit" class="btn btn-primary">Signup</button>

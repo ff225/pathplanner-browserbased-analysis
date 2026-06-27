@@ -301,6 +301,58 @@ body {
     line-height: 1.35;
 }
 
+#preferenceSetBlock .form-hint {
+    margin: -1px 0 8px;
+}
+
+.preference-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 9px;
+}
+
+.preference-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 32px;
+    padding: 6px 8px;
+    color: var(--mac-accent);
+    background: color-mix(in srgb, var(--mac-accent) 8%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--mac-accent) 48%, transparent);
+    border-radius: 8px;
+    font-size: 0.76rem;
+    font-weight: 750;
+    line-height: 1.1;
+    text-decoration: none;
+}
+
+.preference-action:hover,
+.preference-action:focus {
+    color: var(--color-on-primary);
+    background: var(--mac-accent);
+    border-color: var(--mac-accent);
+}
+
+.preference-action--primary {
+    color: var(--color-on-primary);
+    background: var(--mac-accent);
+    border-color: var(--mac-accent);
+}
+
+.preference-action--danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+}
+
+.preference-action:disabled,
+.preference-action.disabled {
+    opacity: 0.42;
+    pointer-events: none;
+}
+
 .input-group {
     position: relative;
 }
@@ -652,11 +704,19 @@ input[type="range"]::-moz-range-thumb {
     text-decoration: none;
 }
 
+.user-toggle {
+    min-height: 58px;
+    padding: 4px 6px;
+    border-radius: 10px;
+    transition: background-color 0.16s ease, color 0.16s ease;
+}
+
 .layer-toggle:hover,
 .layer-toggle:focus,
 .user-toggle:hover,
 .user-toggle:focus {
     color: var(--mac-accent);
+    background: var(--mac-accent-soft);
 }
 
 .layer-icon,
@@ -667,7 +727,7 @@ input[type="range"]::-moz-range-thumb {
     width: 42px;
     height: 42px;
     border: 0.5px solid var(--mac-hairline);
-    border-radius: var(--mac-radius-control);
+    border-radius: 50%;
     background: var(--mac-muted-fill);
     color: var(--mac-accent);
 }
@@ -677,6 +737,29 @@ input[type="range"]::-moz-range-thumb {
     height: 42px;
     object-fit: cover;
     border: 0;
+    border-radius: 50%;
+}
+
+.user-meta {
+    min-width: 0;
+}
+
+.user-meta strong,
+.user-caption {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.user-meta strong {
+    max-width: 100%;
+    font-size: 0.86rem;
+}
+
+.user-caption {
+    display: block;
+    max-width: 100%;
+    font-size: 0.74rem;
 }
 
 .dropdown-toggle::after {
@@ -741,6 +824,9 @@ input[type="range"]::-moz-range-thumb {
 .user-block {
     position: relative;
     z-index: 40;
+    padding: 8px;
+    background: color-mix(in srgb, var(--mac-panel-bg) 62%, transparent);
+    box-shadow: none;
 }
 
 #pm25,

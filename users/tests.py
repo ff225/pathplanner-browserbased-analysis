@@ -81,11 +81,33 @@ class PreferenceMapTests(TestCase):
         self.assertEqual(added_preference.name, 'Edited map route')
         self.assertEqual(added_preference.nature, 6)
 
+    def test_signup_collects_profile_fields_and_clinical_default(self):
+        response = self.client.post(reverse('users:signup'), {
+            'username': 'newpatient',
+            'first_name': 'Ada',
+            'last_name': 'Lovelace',
+            'email': 'ada@example.com',
+            'default_pathology': 'respiratory',
+            'password1': 'A-strong-demo-pass-2026',
+            'password2': 'A-strong-demo-pass-2026',
+        })
+
+        self.assertRedirects(response, reverse('map'), fetch_redirect_response=False)
+        user = User.objects.get(username='newpatient')
+        self.assertEqual(user.first_name, 'Ada')
+        self.assertEqual(user.last_name, 'Lovelace')
+        self.assertEqual(user.email, 'ada@example.com')
+        self.assertEqual(user.userprofile.first_name, 'Ada')
+        self.assertEqual(user.userprofile.last_name, 'Lovelace')
+        self.assertEqual(user.userprofile.email, 'ada@example.com')
+        self.assertEqual(user.userprofile.default_pathology, 'respiratory')
+
     def test_map_renders_preference_controls_and_weight_urls(self):
         self.client.login(username='owner', password='password')
 
         response = self.client.get(reverse('map'))
 
+        self.assertContains(response, 'Route style')
         self.assertContains(response, 'id="preferenceSet"')
         self.assertContains(response, 'data-weights-url-template')
         self.assertContains(response, reverse('users:preference_weights', args=[0]))

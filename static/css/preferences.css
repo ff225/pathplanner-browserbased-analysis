@@ -37,6 +37,16 @@ body {
     font-weight: 800;
 }
 
+.preferences-kicker {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--color-text-muted);
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
 .preferences-header {
     display: flex;
     flex-wrap: wrap;
@@ -54,50 +64,70 @@ body {
     white-space: nowrap;
 }
 
-.preferences-table {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
-    overflow: hidden;
+.preferences-copy {
+    margin: -8px 0 18px;
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+    line-height: 1.45;
+}
+
+.preference-name-card,
+.preference-slider-card {
+    background: var(--color-surface-soft);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
+    padding: 16px;
 }
 
-.preferences-table th,
-.preferences-table td {
-    padding: 13px 14px;
-    border-bottom: 1px solid var(--color-border);
-    text-align: left;
-    vertical-align: middle;
+.preference-name-card {
+    margin-bottom: 14px;
 }
 
-.preferences-table th {
-    color: var(--color-text);
-    background-color: var(--color-surface-muted);
-    font-weight: 800;
-}
-
-.preferences-table tr:last-child td {
-    border-bottom: none;
-}
-
-.preferences-table label {
+.preference-name-card label,
+.preference-slider-card label {
+    display: block;
     margin: 0;
     color: var(--color-text);
-    font-weight: 700;
+    font-weight: 750;
 }
 
-.preferences-table input,
-.preferences-table select,
-.preferences-table textarea {
-    max-width: 100%;
+.preference-name-card input {
+    width: min(100%, 420px);
+    margin-top: 9px;
+    padding: 10px 12px;
+    color: var(--color-text);
+    background: var(--color-surface);
+}
+
+.preference-slider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 12px;
+}
+
+.preference-slider-card {
+    display: grid;
+    gap: 13px;
+}
+
+.preference-slider-copy {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .slider-value {
-    display: inline-block;
-    min-width: 150px;
+    flex: 0 0 auto;
     color: var(--color-text-muted);
+    font-size: 0.82rem;
     font-weight: 650;
+    text-align: right;
+}
+
+.preference-slider-card input[type="range"] {
+    width: 100%;
+    accent-color: var(--color-navigation);
 }
 
 .form-actions {
@@ -145,13 +175,13 @@ body {
         padding: 16px;
     }
 
-    .preferences-table th,
-    .preferences-table td {
-        display: block;
-        width: 100%;
+    .preferences-header,
+    .preference-slider-copy {
+        flex-direction: column;
+        align-items: stretch;
     }
 
-    .preferences-table th {
-        display: none;
+    .slider-value {
+        text-align: left;
     }
 }

@@ -3,10 +3,10 @@ from django.views import View
 from django.contrib.auth import login, logout
 from django.contrib import messages
 from django.urls import reverse_lazy
-from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
+from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.mixins import LoginRequiredMixin
 from .models import UserProfile, UserPreferences
-from .forms import UserProfileForm, UserPreferencesForm
+from .forms import ClinicalSignupForm, UserProfileForm, UserPreferencesForm
 from core.views import CustomRequired, AddItemView, EditItemView, DeleteItemView, UpdateView
 from django.views.generic import ListView
 from django.views.generic.edit import FormView
@@ -16,7 +16,7 @@ from django.views.decorators.http import require_GET
 
 # Class based view to manage user registration logics
 class SignupView(FormView):
-    form_class = UserCreationForm
+    form_class = ClinicalSignupForm
     template_name = 'signup.html'
     success_url = reverse_lazy('map')
     success_message = 'Registration successful. Welcome, you are logged in automatically.'

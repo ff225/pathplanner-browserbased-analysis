@@ -81,8 +81,12 @@ def test_fetch_local_walkability_features_returns_real_osm_tags(tmp_path):
 def test_optimize_local_osm_db_creates_bbox_indexes(tmp_path):
     db_path = tmp_path / 'pois.sqlite3'
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         _insert_poi(conn, row_id='1', category='parks', name='Parco Test', kind='park', lat=44.0, lon=10.0)
+        conn.commit()
+    finally:
+        conn.close()
 
     result = optimize_local_osm_db(db_path)
 
@@ -91,7 +95,12 @@ def test_optimize_local_osm_db_creates_bbox_indexes(tmp_path):
             row[1]
             for row in conn.execute("PRAGMA index_list('poi')").fetchall()
         }
+        journal_mode = conn.execute('PRAGMA journal_mode').fetchone()[0]
+    with sqlite3.connect(f'file:{db_path.resolve()}?mode=ro', uri=True) as conn:
+        readonly_count = conn.execute('SELECT COUNT(*) FROM poi').fetchone()[0]
 
     assert result['counts']['poi'] == 1
     assert 'idx_poi_category_lat_lon_cover' in indexes
     assert 'idx_poi_category_lon_lat_cover' in indexes
+    assert journal_mode == 'delete'
+    assert readonly_count == 1

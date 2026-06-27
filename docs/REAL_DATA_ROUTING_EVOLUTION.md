@@ -394,7 +394,7 @@ Current verification:
 Observed result:
 
 ```text
-47 passed
+51 passed
 ```
 
 Additional coverage was added for:
@@ -404,6 +404,8 @@ Additional coverage was added for:
 - near-duplicate GraphHopper alternatives;
 - walkability penalties;
 - route explanation payloads.
+- local OSM DB bootstrap/validation behavior;
+- read-only SQLite compatibility after DB optimization.
 
 Frontend syntax checks were also run:
 
@@ -497,6 +499,10 @@ runtime/local_osm_pois/
 The Docker entrypoint calls the ensure script only when
 `PATHPLANNER_ENSURE_LOCAL_OSM_DB` is `true` or `1`. Normal restarts therefore do
 not rebuild the DB.
+
+SQLite runtime note: the optimized DB is finalized with `journal_mode=DELETE`
+instead of WAL. This matters when the app mounts the local SQLite DB read-only in
+Docker, because WAL sidecar files can prevent reliable read-only opens.
 
 ### Docker Build Context
 
@@ -704,6 +710,35 @@ GRAPHHOPPER_URL=http://127.0.0.1:8989 \
   --repeats 3
 ```
 
+Backend multi-city smoke test:
+
+```bash
+.venv/bin/python scripts/smoke_backend_cities.py \
+  --require-local-data \
+  --require-walkability
+```
+
+What it checks:
+
+- `/api/backend_astar/` returns at least one route;
+- route path, distance, duration, environment sample count, and explanation are
+  present;
+- with `--require-local-data`, the route must use GraphHopper and local SQLite
+  sources;
+- with `--require-walkability`, the route must expose local walkability feature
+  counts.
+
+The script currently includes Modena, Bologna, Florence, Rome, London, and New
+York cases. It queries the active GraphHopper `/info` bbox and skips cases
+outside the loaded graph. With the current Italy graph, the expected result is:
+
+```text
+4 passed, 0 failed, 2 skipped
+```
+
+London and New York should pass after starting GraphHopper with their respective
+PBF/graph and building the matching local SQLite DB.
+
 The benchmark script currently includes these cases:
 
 | Case | Area | Notes |
@@ -887,6 +922,41 @@ Backend route sampling/cache is coordinated here:
 Cache behavior is intentionally process-local and short-lived. It is not a
 persistent city cache, so a user can move from Modena to New York or London
 without relying on stale precomputed city blobs.
+
+## GUI Testing
+
+GUI testing does not have to be fully manual. The repository already contains
+Playwright tests under:
+
+```text
+tests/playwright/
+```
+
+Recommended split:
+
+- backend smoke tests validate route data correctness and sources;
+- Playwright smoke tests validate that the map page, sidebar, suggestions,
+  route cards, directions, layers, and responsive layout behave correctly;
+- final manual QA is still useful for subjective map readability and clinical
+  UX, but it should not be the only regression check.
+
+Useful Playwright examples already present:
+
+```text
+tests/playwright/search-suggestions-layout.spec.js
+tests/playwright/directions-card.spec.js
+tests/playwright/sidebar-layout.spec.js
+tests/playwright/routing-label.spec.js
+```
+
+The next practical GUI automation target is an end-to-end route smoke:
+
+1. open `/map/`;
+2. fill start/end with fixed coordinates by setting input datasets;
+3. click Find route;
+4. assert route cards and directions render;
+5. assert explanation/source text appears;
+6. optionally toggle layers and verify the map receives overlay elements.
 
 ### Elevation / Slope
 

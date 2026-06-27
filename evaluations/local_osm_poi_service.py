@@ -80,7 +80,8 @@ def _connect(db_path: Path, *, readonly: bool = False) -> sqlite3.Connection:
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with _connect(db_path) as conn:
+    conn = _connect(db_path)
+    try:
         conn.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -114,6 +115,9 @@ def init_db(db_path: Path) -> None:
             );
             """
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def optimize_local_osm_db(db_path: Path) -> Dict[str, Any]:
@@ -122,7 +126,8 @@ def optimize_local_osm_db(db_path: Path) -> Dict[str, Any]:
     started = time.perf_counter()
     if not db_path.exists():
         raise FileNotFoundError(db_path)
-    with _connect(db_path) as conn:
+    conn = _connect(db_path)
+    try:
         conn.executescript(_LOCAL_OSM_DROP_INDEX_SQL)
         conn.executescript(_LOCAL_OSM_INDEX_SQL)
         conn.execute(
@@ -131,12 +136,10 @@ def optimize_local_osm_db(db_path: Path) -> Dict[str, Any]:
         )
         conn.commit()
         conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        try:
-            conn.execute('PRAGMA journal_mode=DELETE')
-        except sqlite3.OperationalError:
-            pass
         conn.execute('ANALYZE')
         conn.execute('PRAGMA optimize')
+        conn.commit()
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         counts = {
             'poi': conn.execute('SELECT COUNT(*) FROM poi').fetchone()[0],
             'walkability_feature': conn.execute(
@@ -146,6 +149,13 @@ def optimize_local_osm_db(db_path: Path) -> Dict[str, Any]:
         index_count = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex%'"
         ).fetchone()[0]
+        try:
+            conn.execute('PRAGMA journal_mode=DELETE').fetchone()
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+    finally:
+        conn.close()
     return {
         'db_path': str(db_path),
         'counts': counts,

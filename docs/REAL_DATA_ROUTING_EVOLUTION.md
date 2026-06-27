@@ -151,20 +151,20 @@ requires an elevation source or a local DEM. Currently, route slope values still
 come from elevation APIs such as OpenTopoData/Open-Meteo unless we add a local
 DEM pipeline.
 
-The current Italy DB was built with `--poi-only` for fast clinical POI scoring,
-so walkability features are not complete yet. However, the backend is now ready
-to use local `walkability_feature` rows when the DB contains them. These features
-penalize routes near steps, steep inclines, bad surfaces, poor smoothness, or
-limited wheelchair accessibility. The penalty is stronger for profiles such as
-`mobility`, `arthritis`, and `cardiac`.
+The current Italy DB has been rebuilt with full walkability extraction enabled,
+so the backend can use local `walkability_feature` rows at route time. These
+features penalize routes near steps, steep inclines, bad surfaces, poor
+smoothness, or limited wheelchair accessibility. The penalty is stronger for
+profiles such as `mobility`, `arthritis`, and `cardiac`.
 
 Current status:
 
 - route scoring already calls the local walkability lookup;
 - penalties are applied when matching rows exist in the SQLite DB;
-- the existing Italy DB is mostly POI-focused, so the next data rebuild should
-  include a complete walkability import if we want this signal to be reliable
-  across the whole country.
+- `runtime/local_osm_pois/italy.sqlite3` now contains `2,999,868`
+  walkability rows from the Italy PBF;
+- the previous POI-only DB was preserved locally as
+  `runtime/local_osm_pois/italy.poi-only.20260627-160103.sqlite3`.
 
 ### Environmental Sampling And Caching
 
@@ -224,12 +224,20 @@ File:
 scripts/build_local_osm_pois.py
 ```
 
-Build POI DB from a PBF:
+Build the full POI + walkability DB from a PBF:
 
 ```bash
 .venv/bin/python scripts/build_local_osm_pois.py \
   --pbf pbf/italy-260626.osm.pbf \
-  --db runtime/local_osm_pois/italy.sqlite3 \
+  --db runtime/local_osm_pois/italy.sqlite3
+```
+
+Build a faster POI-only DB when walkability is not needed:
+
+```bash
+.venv/bin/python scripts/build_local_osm_pois.py \
+  --pbf pbf/italy-260626.osm.pbf \
+  --db runtime/local_osm_pois/italy.poi-only.sqlite3 \
   --poi-only
 ```
 
@@ -470,18 +478,20 @@ Observed improvement on this route:
 More importantly, the Overpass run produced a mirror timeout during the test,
 while SQLite stayed deterministic.
 
-After adaptive environmental sampling/cache, the same Modena local benchmark
-showed a cold/warm pattern:
+After adaptive environmental sampling/cache and the full walkability DB import,
+the same Modena local benchmark showed this cold/warm pattern:
 
 | Run | Time |
 | --- | ---: |
-| first local run | ~840 ms |
-| immediate repeated run | ~31 ms |
+| first local run | ~907 ms |
+| immediate repeated run | ~118 ms |
 
 The second run is fast because route environment samples hit the backend cache.
 This does not mean every fresh route will be 30 ms, but it confirms repeated
 recalculation, route switching, and nearby requests no longer hammer external
-environment providers.
+environment providers. Compared with the smaller POI-only DB, the full DB adds
+walkability lookup work, but remains comfortably below interactive latency on
+the tested Modena route.
 
 Observed payload shape from the latest Modena benchmark:
 
@@ -492,6 +502,8 @@ first_route.distance_m: 1670
 first_route.duration_s: 1202
 first_route.explanation.environment.sample_count: 3
 first_route.explanation.environment.cache_hits: 3 on the repeated run
+first_route.explanation.walkability.feature_count: 900
+first_route.explanation.walkability.penalty: 0.0
 ```
 
 Observed data sources:
@@ -518,6 +530,43 @@ Modena bbox query from the local Italy DB:
 | nightlife | ~0.42 ms |
 
 After index optimization, SQLite uses a covering index for the POI bbox query.
+
+### Full Italy DB Counts
+
+The active local Italy DB is:
+
+```text
+runtime/local_osm_pois/italy.sqlite3
+```
+
+Current size:
+
+```text
+~1.9 GB
+```
+
+POI rows:
+
+```text
+1,533,679
+```
+
+Walkability rows:
+
+| Category | Rows |
+| --- | ---: |
+| `incline` | 111,843 |
+| `smoothness` | 7,335 |
+| `steps` | 125,129 |
+| `surface` | 2,730,692 |
+| `wheelchair` | 24,869 |
+| total | 2,999,868 |
+
+The full import command took:
+
+```text
+868.61 s
+```
 
 ## Current Runtime Shape
 
@@ -671,9 +720,10 @@ The lookup radius is controlled by:
 BACKEND_ASTAR_WALKABILITY_RADIUS_M=35
 ```
 
-Current caveat: the backend path is implemented and tested, but the local DB
-must be rebuilt with complete walkability features before this signal is
-representative for all Italian routes.
+Current caveat: this signal depends on OSM tag completeness. The DB now contains
+the extracted features, but OpenStreetMap coverage can vary by city and road
+type. Missing `surface`, `smoothness`, `incline`, or `wheelchair` tags mean “no
+known penalty”, not guaranteed perfect accessibility.
 
 ### Weather
 
@@ -825,8 +875,10 @@ The next likely improvement is to reduce those route-time API calls:
 - batch environmental samples more aggressively where providers allow it;
 - use GraphHopper path details for road/surface metadata where possible;
 - add a local DEM if true offline slope is required;
-- import and integrate OSM walkability features (`steps`, `incline`, `surface`,
-  `smoothness`, `wheelchair`) into the clinical score.
+- tune the clinical weight of walkability features after testing more patient
+  profiles and cities;
+- build equivalent local GraphHopper/SQLite datasets for London and New York
+  when those demos are needed.
 
 ## Local Checkpoints
 

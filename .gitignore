@@ -56,3 +56,4 @@ runtime/graphhopper/lib/
 runtime/graphhopper/*.pid
 runtime/graphhopper/*.log
 runtime/graphhopper/config/config-example.yml
+runtime/local_osm_pois/

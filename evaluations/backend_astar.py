@@ -112,11 +112,11 @@ def _fetch_poi_lists_parallel(
     max_workers: int = BACKEND_ASTAR_IO_WORKERS,
     timeout: float = BACKEND_ASTAR_POI_TIMEOUT_SECONDS,
     max_mirrors: int = BACKEND_ASTAR_OVERPASS_MAX_MIRRORS,
-) -> Dict[str, List[Tuple[float, float]]]:
+) -> Tuple[Dict[str, List[Tuple[float, float]]], Dict[str, str]]:
     if not categories:
-        return {}
+        return {}, {}
 
-    def fetch_category(category: str) -> Tuple[str, List[Tuple[float, float]]]:
+    def fetch_category(category: str) -> Tuple[str, List[Tuple[float, float]], str]:
         if category == 'nature':
             service_category = 'parks'
         elif category == 'hospital':
@@ -137,19 +137,21 @@ def _fetch_poi_lists_parallel(
             for poi in payload.get('pois', [])
             if poi.get('lat') is not None and poi.get('lon') is not None
         ]
-        return category, pois
+        return category, pois, payload.get('source') or 'unknown'
 
     out: Dict[str, List[Tuple[float, float]]] = {}
+    sources: Dict[str, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(categories))) as executor:
         futures = [executor.submit(fetch_category, category) for category in categories]
         for future in concurrent.futures.as_completed(futures):
             try:
-                category, pois = future.result()
+                category, pois, source = future.result()
                 out[category] = pois
+                sources[category] = source
             except Exception:
                 # Missing POIs should reduce preference influence, not fail routing.
                 continue
-    return out
+    return out, sources
 
 
 def _build_street_graph(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -789,7 +791,7 @@ def _generate_graphhopper_routes(
         poi_future = executor.submit(_fetch_poi_lists_parallel, bbox, active_categories)
         env_future = executor.submit(_prefetch_environment_samples, start, goal)
         input_deadline = time.perf_counter() + BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS
-        poi_lists = poi_future.result(timeout=BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS)
+        poi_lists, poi_sources = poi_future.result(timeout=BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS)
         remaining = max(0.1, input_deadline - time.perf_counter())
         env_samples = env_future.result(timeout=remaining)
     except concurrent.futures.TimeoutError as exc:
@@ -801,7 +803,7 @@ def _generate_graphhopper_routes(
     if poi_lists:
         for category, pois in poi_lists.items():
             if pois:
-                data_sources[f'poi_{category}'] = 'OpenStreetMap-Overpass'
+                data_sources[f'poi_{category}'] = poi_sources.get(category, 'unknown')
     data_sources['street_graph'] = 'GraphHopper local OSM graph'
 
     green_scale = tolerance_green_scale(distance_tolerance)
@@ -926,7 +928,7 @@ def generate_backend_astar_routes(
         input_deadline = time.perf_counter() + BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS
         street_payload = street_future.result(timeout=BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS)
         remaining = max(0.1, input_deadline - time.perf_counter())
-        poi_lists = poi_future.result(timeout=remaining)
+        poi_lists, poi_sources = poi_future.result(timeout=remaining)
     except concurrent.futures.TimeoutError as exc:
         raise TimeoutError('backend A* data lookup timed out') from exc
     finally:
@@ -984,7 +986,7 @@ def generate_backend_astar_routes(
     if poi_lists:
         for category, pois in poi_lists.items():
             if pois:
-                data_sources[f'poi_{category}'] = 'OpenStreetMap-Overpass'
+                data_sources[f'poi_{category}'] = poi_sources.get(category, 'unknown')
     data_sources['street_graph'] = base_graph['source']
 
     def score_route(route: Dict[str, Any]) -> Dict[str, Any]:

@@ -9,15 +9,18 @@ services:
       DJANGO_CSRF_COOKIE_SECURE: "false"
       MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN:-}
       OPENAQ_API_KEY: ${OPENAQ_API_KEY:-}
-      GRAPHHOPPER_URL: ${GRAPHHOPPER_URL:-}
+      GRAPHHOPPER_URL: ${GRAPHHOPPER_URL:-http://host.docker.internal:8989}
       GRAPHHOPPER_API_KEY: ${GRAPHHOPPER_API_KEY:-}
       GRAPHHOPPER_TIMEOUT_SECONDS: ${GRAPHHOPPER_TIMEOUT_SECONDS:-8}
       GRAPHHOPPER_FORCE: ${GRAPHHOPPER_FORCE:-false}
       GRAPHHOPPER_PROFILE_WALKING: ${GRAPHHOPPER_PROFILE_WALKING:-foot}
       GRAPHHOPPER_PROFILE_CYCLING: ${GRAPHHOPPER_PROFILE_CYCLING:-bike}
       GRAPHHOPPER_PROFILE_CAR: ${GRAPHHOPPER_PROFILE_CAR:-car}
+      LOCAL_OSM_POI_DB: ${LOCAL_OSM_POI_DB:-/app/runtime/local_osm_pois/italy.sqlite3}
     ports:
       - "127.0.0.1:8765:8000"
+    volumes:
+      - ./runtime/local_osm_pois:/app/runtime/local_osm_pois:ro
     command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 
   nginx:

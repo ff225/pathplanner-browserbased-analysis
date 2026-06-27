@@ -22,6 +22,7 @@ GRAPHHOPPER_FORCE=false
 GRAPHHOPPER_PROFILE_WALKING=foot
 GRAPHHOPPER_PROFILE_CYCLING=bike
 GRAPHHOPPER_PROFILE_CAR=car
+LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
 ```
 
 Behavior:
@@ -85,13 +86,52 @@ road-graph acquisition.
 
 ## POI locality
 
-Parks and hospitals can also be moved off public Overpass. The clean production
-route is importing the same OSM extracts into a local POI store such as PostGIS
-or a lightweight extracted SQLite table:
+Parks, hospitals, entertainment/nightlife/tourism POIs, and useful walkability
+signals can also be moved off public Overpass. Build a local SQLite index from
+the same PBF extract:
 
-- parks: `leisure=park`, `landuse=grass`, `natural=wood`, relevant relations
-- hospitals: `amenity=hospital`, `healthcare=hospital`
-- optional accessibility/rest data: benches, toilets, pharmacies, crossings,
-  wheelchair tags, surface/smoothness tags
+```bash
+.venv/bin/python scripts/build_local_osm_pois.py \
+  --pbf pbf/italy-260626.osm.pbf \
+  --db runtime/local_osm_pois/italy.sqlite3
+```
 
-That would make POI scoring local and remove the next major Overpass dependency.
+For faster route-scoring imports, skip walkability features:
+
+```bash
+.venv/bin/python scripts/build_local_osm_pois.py \
+  --pbf pbf/italy-260626.osm.pbf \
+  --db runtime/local_osm_pois/italy.sqlite3 \
+  --poi-only
+```
+
+Then point the app at that explicit database:
+
+```env
+LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
+```
+
+For local Docker, `docker-compose.local.yml` mounts `runtime/local_osm_pois`
+read-only into `/app/runtime/local_osm_pois`, so changing from Italy to London or
+New York means building/selecting the matching DB. There is no hidden persistent
+city cache.
+
+Extracted POIs:
+
+- parks: `leisure=park`, `landuse=grass`, `natural=wood` on nodes/ways
+- hospitals/clinics: `amenity=hospital|clinic`, `healthcare=hospital|clinic`
+- entertainment/nightlife/tourism: the same categories used by route scoring
+- optional rest/access data: pharmacies, toilets, drinking water, benches
+
+Extracted walkability feature centroids:
+
+- `highway=steps`
+- `incline=*`
+- `surface=*`
+- `smoothness=*`
+- `wheelchair=*`
+
+The PBF does not contain a full terrain model, so true slope percentage still
+comes from elevation APIs unless we add a local DEM. OSM `incline` and `steps`
+are real route-quality signals and can be folded into clinical scoring without
+inventing values.

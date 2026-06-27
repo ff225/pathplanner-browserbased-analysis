@@ -24,6 +24,8 @@ analysis_outputs
 results_old
 uploads
 staticfiles
+pbf
+runtime
 node_modules
 paper_overleaf.tex
 references.bib

@@ -40,6 +40,8 @@ tmp/
 temp/
 test-results/
 artifacts/playwright/
+artifacts/playwright-results/
+artifacts/playwright-report/
 
 # Project-generated outputs / user uploads
 analysis_outputs/

@@ -993,79 +993,83 @@ without relying on stale precomputed city blobs.
 
 ## GUI Testing
 
-GUI testing does not have to be fully manual. The repository already contains
-Playwright tests under:
+GUI testing does not have to be manual-only. The current primary GUI regression
+suite is Playwright, configured by:
 
 ```text
-tests/playwright/
-```
-
-Recommended split:
-
-- backend smoke tests validate route data correctness and sources;
-- Playwright smoke tests validate that the map page, sidebar, suggestions,
-  route cards, directions, layers, and responsive layout behave correctly;
-- final manual QA is still useful for subjective map readability and clinical
-  UX, but it should not be the only regression check.
-
-Useful Playwright examples already present:
-
-```text
-tests/playwright/search-suggestions-layout.spec.js
-tests/playwright/directions-card.spec.js
-tests/playwright/sidebar-layout.spec.js
-tests/playwright/routing-label.spec.js
-```
-
-The Docker GUI smoke is:
-
-```text
-scripts/smoke_gui.py
+package.json
+playwright.config.js
+tests/playwright/pathplanner-full.spec.js
+tests/playwright/support/pathplanner.js
 ```
 
 Run it against the rebuilt Docker app:
 
 ```bash
-.venv/bin/python scripts/smoke_gui.py \
-  --base-url http://127.0.0.1:8765 \
-  --screenshot-dir artifacts/gui-smoke-current
+PP_BASE_URL=http://127.0.0.1:8765 \
+PP_SCREENSHOT_DIR=artifacts/playwright \
+npm run test:gui:full
 ```
 
-It checks:
+Run all current Playwright specs:
 
-- desktop and mobile viewports;
-- `/map/` loading;
-- fixed Modena start/end route input datasets;
-- route cards and turn-by-turn directions;
-- distance/duration summary spacing;
-- backend explanation/source text in the route cards;
-- PM2.5 layer controls before and after route rendering;
-- actual PM2.5 heatmap canvas rendering;
-- horizontal overflow;
-- critical console/API failures.
-
-Latest local Docker smoke result:
-
-```text
-PASS desktop: 2 cards, 16 steps
-PASS mobile: 2 cards, 16 steps
+```bash
+PP_BASE_URL=http://127.0.0.1:8765 \
+PP_SCREENSHOT_DIR=artifacts/playwright \
+npm run test:gui
 ```
 
-Screenshots are written to:
+The full GUI suite checks:
+
+- selected start/end points and controls persist after leaving and returning to
+  `/map/`;
+- anonymous users can still select built-in preference presets;
+- patient profile selection resets routing preference correctly;
+- Mapbox autocomplete layout stays inside the sidebar and writes coordinates;
+- PM2.5, PM10, NO2, O3, and pollen layer buttons draw real Leaflet heatmap
+  overlays;
+- real backend routing renders deduplicated alternatives, source text,
+  distance/duration summary, and turn-by-turn directions;
+- the `/api/backend_astar/` request includes transport mode, pathology, and
+  distance tolerance;
+- route preview starts, draws the preview cursor, and stops cleanly;
+- mobile route directions fit the viewport and restore layer access after close;
+- the environmental drawer opens, refreshes, and keeps missing values as `N/D`.
+
+Current local Docker result:
 
 ```text
-artifacts/gui-smoke-current/desktop-route.png
-artifacts/gui-smoke-current/mobile-route.png
-artifacts/gui-smoke-current/desktop-closed.png
-artifacts/gui-smoke-current/mobile-closed.png
+16 passed, 8 skipped
+```
+
+The skipped tests are legacy specs that target retired UI selectors or removed
+visual elements such as the old route selector/caption. Their current behavior
+is covered by `pathplanner-full.spec.js` plus the active sidebar,
+autocomplete, and environmental drawer specs.
+
+The older Python smoke remains available for quick manual debugging:
+
+```text
+scripts/smoke_gui.py
+```
+
+but it should not be treated as the complete GUI regression suite.
+
+Playwright screenshots, traces, videos, and HTML report artifacts are written
+under:
+
+```text
+artifacts/playwright
+artifacts/playwright-results
+artifacts/playwright-report
 ```
 
 If more coverage is needed, the next practical GUI automation targets are:
 
-1. type real address suggestions instead of setting datasets directly;
-2. switch between route alternatives and verify duplicates stay removed;
-3. exercise preferences/profile changes without losing the selected route inputs;
-4. capture layer screenshots with different pollutants and pollen.
+1. log in with a seeded user and verify saved preference presets;
+2. run the same full suite against London and New York data after importing
+   those GraphHopper/SQLite datasets;
+3. add visual comparison thresholds for the route panel once the design settles.
 
 ### Elevation / Slope
 

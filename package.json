@@ -1,0 +1,12 @@
+{
+  "name": "pathplanner-browserbased-analysis",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "test:gui": "playwright test",
+    "test:gui:full": "playwright test tests/playwright/pathplanner-full.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1"
+  }
+}

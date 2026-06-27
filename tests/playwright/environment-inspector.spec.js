@@ -14,8 +14,8 @@ async function openInspectorAtRome(page, condition = 'respiratory') {
     await waitForMapReady(page);
     await page.evaluate(() => window.map.setView([41.9028, 12.4964], 13));
     await page.selectOption('#patientCondition', condition);
-    await page.locator('#envInspectorToggle').click();
-    await expect(page.locator('body')).toHaveClass(/env-inspector-open/);
+    await page.locator('#rightSidebarToggle').click();
+    await expect(page.locator('body')).toHaveClass(/right-sidebar-open/);
     await waitForInspectorOpenLayout(page);
 }
 
@@ -24,7 +24,7 @@ async function waitForInspectorOpenLayout(page) {
         const panel = document.getElementById('envInspectorPanel')?.getBoundingClientRect();
         return Boolean(
             panel &&
-            document.body.classList.contains('env-inspector-open') &&
+            document.body.classList.contains('right-sidebar-open') &&
             panel.right <= window.innerWidth &&
             panel.left >= 0
         );
@@ -61,7 +61,7 @@ test('right environmental drawer renders real values with source and timestamp',
         const timestamps = availableCards.map((card) => card.querySelector('.env-metric-timestamp')?.textContent?.trim());
 
         return {
-            bodyOpen: document.body.classList.contains('env-inspector-open'),
+            bodyOpen: document.body.classList.contains('right-sidebar-open'),
             cards: cards.length,
             availableCards: availableCards.length,
             hasNumericValue: values.some((value) => value && value !== 'N/D'),
@@ -84,7 +84,7 @@ test('right environmental drawer renders real values with source and timestamp',
     await page.screenshot({ path: `${screenshotDir}/pp-env-inspector-real.png`, fullPage: false });
 
     await page.locator('#envInspectorClose').click();
-    await expect(page.locator('body')).not.toHaveClass(/env-inspector-open/);
+    await expect(page.locator('body')).not.toHaveClass(/right-sidebar-open/);
 });
 
 test('right environmental drawer keeps unavailable metrics as N/D', async ({ page }) => {

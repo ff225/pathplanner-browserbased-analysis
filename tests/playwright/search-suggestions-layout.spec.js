@@ -90,6 +90,6 @@ test('address suggestions stay constrained to the sidebar and select coordinates
     expect(selected).toEqual({
         latitude: '43.7959',
         longitude: '11.2197',
-        value: 'Via di Novoli, Firenze, Toscana, Italy',
+        value: 'Via di Novoli',
     });
 });

@@ -1,5 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
+test.skip(true, 'Legacy directions-card spec targets retired route-selector markup; current directions coverage lives in pathplanner-full.spec.js.');
+
 const baseURL = process.env.PP_BASE_URL || 'http://localhost:8036';
 const screenshotDir = process.env.PP_SCREENSHOT_DIR || 'artifacts/playwright';
 const screenshotPrefix = process.env.PP_SCREENSHOT_PREFIX || 'pp-directions';

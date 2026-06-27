@@ -796,6 +796,52 @@ function getRouteEnvDataBadge(route) {
     };
 }
 
+function formatBackendExplanationSummary(route) {
+    const explanation = route?.backendExplanation;
+    if (!explanation || route?.isDirectRoute) {
+        return '';
+    }
+    const parts = [];
+    const env = explanation.environment || {};
+    if (env.airQuality && Number.isFinite(Number(env.airQuality.avg))) {
+        parts.push(`AQ ${Number(env.airQuality.avg).toFixed(1)}`);
+    }
+    if (env.slope && Number.isFinite(Number(env.slope.avg))) {
+        parts.push(`slope ${Number(env.slope.avg).toFixed(1)}%`);
+    }
+    const nearest = explanation.nearest_pois_m || {};
+    if (Number.isFinite(Number(nearest.nature))) {
+        parts.push(`green ${Math.round(Number(nearest.nature))} m`);
+    }
+    if (Number.isFinite(Number(nearest.hospital))) {
+        parts.push(`care ${Math.round(Number(nearest.hospital))} m`);
+    }
+    const walkability = explanation.walkability || {};
+    if (Number(walkability.penalty) > 0) {
+        parts.push(`walkability ${Number(walkability.penalty).toFixed(0)}`);
+    }
+    return parts.slice(0, 5).join(' · ');
+}
+
+function formatBackendDataSourceSummary(route) {
+    const sources = route?.dataSourceInfo || {};
+    if (!sources || route?.isDirectRoute) {
+        return '';
+    }
+    const parts = [];
+    if (sources.street_graph) {
+        parts.push(sources.street_graph.includes('GraphHopper') ? 'GraphHopper' : sources.street_graph);
+    }
+    const poiSource = sources.poi_nature || sources.poi_hospital || sources.poi_nightlife;
+    if (poiSource) {
+        parts.push(poiSource.includes('SQLite') ? 'local OSM POIs' : 'Overpass POIs');
+    }
+    if (sources.airQuality) {
+        parts.push(sources.airQuality.replace(' Air Quality API', ' AQ'));
+    }
+    return parts.slice(0, 4).join(' · ');
+}
+
 function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
     if (!routeInfo) {
         return;
@@ -833,6 +879,18 @@ function renderRouteSelectorInfo(routeInfo, route, index, isSelected) {
 
     const description = L.DomUtil.create('div', 'route-card-description', routeInfo);
     description.textContent = getUserFacingRouteDescription(route);
+
+    const explanationSummary = formatBackendExplanationSummary(route);
+    if (explanationSummary) {
+        const explanation = L.DomUtil.create('div', 'route-card-explanation', routeInfo);
+        explanation.textContent = explanationSummary;
+    }
+
+    const sourceSummary = formatBackendDataSourceSummary(route);
+    if (sourceSummary) {
+        const sources = L.DomUtil.create('div', 'route-card-sources', routeInfo);
+        sources.textContent = sourceSummary;
+    }
 }
 
 /**

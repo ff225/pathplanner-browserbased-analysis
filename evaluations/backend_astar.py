@@ -33,6 +33,7 @@ from .environmental_data_service import (
     fetch_named_pois,
     fetch_street_graph,
 )
+from .local_osm_poi_service import fetch_local_walkability_features
 
 
 BACKEND_ASTAR_MAX_EXPANSIONS = int(os.getenv('BACKEND_ASTAR_MAX_EXPANSIONS', '20000'))
@@ -46,12 +47,17 @@ BACKEND_ASTAR_MAX_ALTERNATIVE_ATTEMPTS = int(os.getenv('BACKEND_ASTAR_MAX_ALT_AT
 BACKEND_ASTAR_OVERPASS_MAX_MIRRORS = int(os.getenv('BACKEND_ASTAR_OVERPASS_MAX_MIRRORS', '1'))
 BACKEND_ASTAR_STREET_TIMEOUT_SECONDS = float(os.getenv('BACKEND_ASTAR_STREET_TIMEOUT_SECONDS', '6'))
 BACKEND_ASTAR_POI_TIMEOUT_SECONDS = float(os.getenv('BACKEND_ASTAR_POI_TIMEOUT_SECONDS', '4'))
+BACKEND_ASTAR_ENV_CACHE_TTL_SECONDS = float(os.getenv('BACKEND_ASTAR_ENV_CACHE_TTL_SECONDS', '600'))
+BACKEND_ASTAR_ENV_CACHE_PRECISION = int(os.getenv('BACKEND_ASTAR_ENV_CACHE_PRECISION', '3'))
+BACKEND_ASTAR_WALKABILITY_RADIUS_M = float(os.getenv('BACKEND_ASTAR_WALKABILITY_RADIUS_M', '35'))
 GRAPHHOPPER_URL = (os.getenv('GRAPHHOPPER_URL') or '').rstrip('/')
 GRAPHHOPPER_API_KEY = os.getenv('GRAPHHOPPER_API_KEY') or ''
 GRAPHHOPPER_TIMEOUT_SECONDS = float(os.getenv('GRAPHHOPPER_TIMEOUT_SECONDS', '8'))
 GRAPHHOPPER_FORCE = os.getenv('GRAPHHOPPER_FORCE', '').lower() in ('1', 'true', 'yes')
 
 POI_CATEGORIES = ('nature', 'entertainment', 'nightlife', 'tourism', 'hospital')
+WALKABILITY_FEATURE_CATEGORIES = ('steps', 'incline', 'surface', 'smoothness', 'wheelchair')
+_BACKEND_ENV_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
 def normalize_transport_mode(mode: Optional[str]) -> str:
@@ -152,6 +158,153 @@ def _fetch_poi_lists_parallel(
                 # Missing POIs should reduce preference influence, not fail routing.
                 continue
     return out, sources
+
+
+def _fetch_walkability_features(
+    bbox: Dict[str, float],
+    limit: int = 900,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    try:
+        payload = fetch_local_walkability_features(
+            bbox['min_lat'],
+            bbox['min_lon'],
+            bbox['max_lat'],
+            bbox['max_lon'],
+            limit=limit,
+        )
+    except Exception:
+        return [], None
+    if not payload:
+        return [], None
+    features = [
+        feature
+        for feature in payload.get('features', [])
+        if feature.get('lat') is not None and feature.get('lon') is not None
+    ]
+    return features, payload.get('source')
+
+
+def _parse_incline_percent(kind: Optional[str]) -> Optional[float]:
+    if not kind:
+        return None
+    raw = str(kind).strip().lower()
+    if raw in {'up', 'down'}:
+        return 8.0
+    if raw in {'steep', 'very_steep'}:
+        return 12.0
+    if raw.endswith('%'):
+        raw = raw[:-1]
+    try:
+        value = abs(float(raw))
+    except ValueError:
+        return None
+    return min(25.0, value)
+
+
+_BAD_SURFACES = {
+    'cobblestone',
+    'sett',
+    'unpaved',
+    'gravel',
+    'fine_gravel',
+    'dirt',
+    'earth',
+    'ground',
+    'mud',
+    'sand',
+    'grass',
+}
+_BAD_SMOOTHNESS = {'bad', 'very_bad', 'horrible', 'very_horrible', 'impassable'}
+
+
+def _walkability_feature_penalty(
+    feature: Dict[str, Any],
+    distance_m: float,
+    patient: Dict[str, Any],
+    mode: str,
+) -> float:
+    if mode == 'car' or distance_m > BACKEND_ASTAR_WALKABILITY_RADIUS_M:
+        return 0.0
+    category = str(feature.get('category') or '')
+    kind = str(feature.get('kind') or '').lower()
+    patient_name = patient.get('name')
+    slope_mult = patient.get('slopeSensitivity', 1) or 1
+    proximity = max(0.0, 1.0 - distance_m / max(1.0, BACKEND_ASTAR_WALKABILITY_RADIUS_M))
+    penalty = 0.0
+
+    if category == 'steps':
+        penalty = 95.0
+        if patient_name == 'arthritis':
+            penalty += 30.0
+        elif patient_name == 'mobility':
+            penalty += 45.0
+        elif patient_name == 'cardiac':
+            penalty += 20.0
+    elif category == 'incline':
+        incline = _parse_incline_percent(kind) or 6.0
+        penalty = (incline ** 1.5) * max(1.0, slope_mult) / 2.5
+    elif category == 'surface' and kind in _BAD_SURFACES:
+        penalty = 28.0
+        if patient_name in {'mobility', 'arthritis'}:
+            penalty += 24.0
+    elif category == 'smoothness' and kind in _BAD_SMOOTHNESS:
+        penalty = 32.0
+        if patient_name in {'mobility', 'arthritis'}:
+            penalty += 28.0
+    elif category == 'wheelchair' and kind in {'no', 'limited'}:
+        penalty = 45.0 if kind == 'no' else 22.0
+        if patient_name == 'mobility':
+            penalty *= 1.6
+    return penalty * proximity
+
+
+def _walkability_penalty_for_point(
+    point: Dict[str, float],
+    features: Sequence[Dict[str, Any]],
+    patient: Dict[str, Any],
+    mode: str,
+) -> Tuple[float, List[Dict[str, Any]]]:
+    total = 0.0
+    hits = []
+    for feature in features:
+        distance_m = haversine_m(point, {'lat': float(feature['lat']), 'lon': float(feature['lon'])})
+        penalty = _walkability_feature_penalty(feature, distance_m, patient, mode)
+        if penalty <= 0:
+            continue
+        total += penalty
+        if len(hits) < 5:
+            hits.append({
+                'category': feature.get('category'),
+                'kind': feature.get('kind'),
+                'distance_m': round(distance_m),
+                'penalty': round(penalty, 1),
+            })
+    return total, hits
+
+
+def _score_walkability_for_path(
+    path: Sequence[Dict[str, float]],
+    features: Sequence[Dict[str, Any]],
+    patient: Dict[str, Any],
+    mode: str,
+) -> Tuple[float, Dict[str, Any]]:
+    if not path or not features:
+        return 0.0, {'penalty': 0.0, 'hits': [], 'feature_count': len(features or [])}
+    total = 0.0
+    hits: List[Dict[str, Any]] = []
+    step = max(1, len(path) // 80)
+    for point in path[::step]:
+        point_penalty, point_hits = _walkability_penalty_for_point(point, features, patient, mode)
+        total += point_penalty
+        for hit in point_hits:
+            if len(hits) >= 8:
+                break
+            hits.append(hit)
+    return total, {
+        'penalty': round(total, 1),
+        'hits': hits,
+        'feature_count': len(features),
+    }
 
 
 def _build_street_graph(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -333,6 +486,11 @@ def _sample_environment_points(
     goal: Dict[str, float],
     max_samples: int = BACKEND_ASTAR_MAX_ENV_SAMPLES,
 ) -> List[Dict[str, float]]:
+    route_distance = haversine_m(start, goal)
+    if route_distance <= 3000:
+        max_samples = min(max_samples, 3)
+    elif route_distance <= 8000:
+        max_samples = min(max_samples, 5)
     mid = {'lat': (start['lat'] + goal['lat']) / 2, 'lon': (start['lon'] + goal['lon']) / 2}
     points = [start, mid, goal]
     if max_samples <= 3:
@@ -346,6 +504,21 @@ def _sample_environment_points(
     return points
 
 
+def reset_backend_astar_state() -> None:
+    """Reset in-memory backend A* caches. Test/maintenance hook."""
+    _BACKEND_ENV_CACHE.clear()
+
+
+def _backend_env_cache_key(lat: float, lon: float) -> str:
+    return f'{round(lat, BACKEND_ASTAR_ENV_CACHE_PRECISION)},{round(lon, BACKEND_ASTAR_ENV_CACHE_PRECISION)}'
+
+
+def _copy_env_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    copied = dict(payload)
+    copied['dataSources'] = dict(payload.get('dataSources') or {})
+    return copied
+
+
 def _fetch_backend_environment_data(lat: float, lon: float) -> Dict[str, Any]:
     """Fast real-only environmental snapshot for interactive backend A*.
 
@@ -354,6 +527,13 @@ def _fetch_backend_environment_data(lat: float, lon: float) -> Dict[str, Any]:
     influence enters through the graph edge metadata. Missing fields stay
     ``None`` instead of being filled with synthetic defaults.
     """
+    cache_key = _backend_env_cache_key(lat, lon)
+    cached = _BACKEND_ENV_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] <= BACKEND_ASTAR_ENV_CACHE_TTL_SECONDS:
+        out = _copy_env_payload(cached[1])
+        out['cacheHit'] = True
+        return out
+
     out: Dict[str, Any] = {
         'temperature': None,
         'humidity': None,
@@ -395,6 +575,9 @@ def _fetch_backend_environment_data(lat: float, lon: float) -> Dict[str, Any]:
     except Exception as exc:
         print(f'[backend_astar slope] {lat},{lon}: {exc}')
 
+    out['cacheHit'] = False
+    out['cacheKey'] = cache_key
+    _BACKEND_ENV_CACHE[cache_key] = (time.time(), _copy_env_payload(out))
     return out
 
 
@@ -483,6 +666,8 @@ def _calculate_edge_cost(
     env_samples: Sequence[Dict[str, Any]],
     node_penalties: Dict[str, float],
     green_scale: float,
+    walkability_features: Optional[Sequence[Dict[str, Any]]] = None,
+    mode: str = 'walking',
 ) -> float:
     neighbor = edge['node']
     distance = edge.get('distance') or haversine_m(current, neighbor)
@@ -550,6 +735,13 @@ def _calculate_edge_cost(
         if weight:
             penalty = apply_preference_poi_adjustment(penalty, weight, distances.get(category))
 
+    walkability_penalty, _ = _walkability_penalty_for_point(
+        neighbor,
+        walkability_features or [],
+        patient,
+        mode,
+    )
+    penalty += walkability_penalty
     penalty += node_penalties.get(_street_node_id(neighbor), 0.0)
     edge_scale = max(0.25, distance / 100.0)
     return current_g + distance + max(0.0, penalty) * edge_scale
@@ -573,6 +765,8 @@ def _street_graph_astar(
     env_samples: Sequence[Dict[str, Any]],
     node_penalties: Optional[Dict[str, float]] = None,
     green_scale: float = 1.0,
+    walkability_features: Optional[Sequence[Dict[str, Any]]] = None,
+    mode: str = 'walking',
 ) -> Optional[Dict[str, Any]]:
     start_node = graph['start_node']
     goal_node = graph['goal_node']
@@ -618,6 +812,8 @@ def _street_graph_astar(
                 env_samples,
                 node_penalties,
                 green_scale,
+                walkability_features,
+                mode,
             )
             if tentative < g_score.get(neighbor_id, float('inf')):
                 came_from[neighbor_id] = current
@@ -635,6 +831,45 @@ def _path_signature(path: Sequence[Dict[str, float]], precision: int = 5) -> str
         if not deduped or deduped[-1] != key:
             deduped.append(key)
     return '|'.join(deduped)
+
+
+def _path_overlap_ratio(
+    path: Sequence[Dict[str, float]],
+    other: Sequence[Dict[str, float]],
+    threshold_m: float = 35.0,
+) -> float:
+    if not path or not other:
+        return 0.0
+    shorter, longer = (path, other) if len(path) <= len(other) else (other, path)
+    step = max(1, len(shorter) // 80)
+    sampled = shorter[::step]
+    if not sampled:
+        return 0.0
+    matches = 0
+    longer_step = max(1, len(longer) // 160)
+    longer_sampled = longer[::longer_step]
+    for point in sampled:
+        nearest = min(haversine_m(point, candidate) for candidate in longer_sampled)
+        if nearest <= threshold_m:
+            matches += 1
+    return matches / len(sampled)
+
+
+def _is_similar_route(
+    path: Sequence[Dict[str, float]],
+    distance_m: float,
+    existing_routes: Sequence[Dict[str, Any]],
+) -> bool:
+    signature = _path_signature(path, precision=5)
+    for route in existing_routes:
+        if route.get('signature') == signature:
+            return True
+        existing_path = route.get('path') or []
+        existing_distance = _safe_float(route.get('distance_m')) or calculate_path_length(existing_path)
+        distance_delta = abs(distance_m - existing_distance) / max(1.0, min(distance_m, existing_distance))
+        if distance_delta <= 0.08 and _path_overlap_ratio(path, existing_path) >= 0.86:
+            return True
+    return False
 
 
 def _add_route_penalties(node_penalties: Dict[str, float], path: Sequence[Dict[str, float]], graph: Dict[str, Any], amount: float = 250.0) -> None:
@@ -737,6 +972,8 @@ def _score_candidate_path(
     env_samples: Sequence[Dict[str, Any]],
     green_scale: float,
     base_distance: float,
+    walkability_features: Optional[Sequence[Dict[str, Any]]] = None,
+    mode: str = 'walking',
 ) -> float:
     if not path:
         return float('inf')
@@ -760,9 +997,102 @@ def _score_candidate_path(
                 nearest = min(haversine_m(point, {'lat': lat, 'lon': lon}) for lat, lon in pois)
                 penalty = apply_preference_poi_adjustment(penalty, weight * green_scale, nearest)
         total += penalty * max(0.1, index / max(1, len(path)))
+    walkability_penalty, _ = _score_walkability_for_path(path, walkability_features or [], patient, mode)
+    total += walkability_penalty
     # Candidate ranking may reward clinically useful detours, but never so much
     # that a route becomes implausibly "free" compared with its physical length.
     return max(base_distance * 0.55, total)
+
+
+def _route_env_summary(env_samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    values: Dict[str, List[float]] = {
+        'airQuality': [],
+        'slope': [],
+        'temperature': [],
+        'humidity': [],
+        'weather': [],
+    }
+    cache_hits = 0
+    for sample in env_samples:
+        env = sample.get('env') or {}
+        if env.get('cacheHit'):
+            cache_hits += 1
+        for key in values:
+            value = _safe_float(env.get(key))
+            if value is not None:
+                values[key].append(value)
+    out: Dict[str, Any] = {'sample_count': len(env_samples), 'cache_hits': cache_hits}
+    for key, nums in values.items():
+        if nums:
+            out[key] = {
+                'avg': round(sum(nums) / len(nums), 2),
+                'min': round(min(nums), 2),
+                'max': round(max(nums), 2),
+            }
+    return out
+
+
+def _nearest_poi_summary(
+    path: Sequence[Dict[str, float]],
+    poi_lists: Optional[Dict[str, List[Tuple[float, float]]]],
+) -> Dict[str, Optional[float]]:
+    summary: Dict[str, Optional[float]] = {}
+    if not path or not poi_lists:
+        return summary
+    step = max(1, len(path) // 80)
+    sampled = path[::step]
+    for category, pois in poi_lists.items():
+        if not pois:
+            summary[category] = None
+            continue
+        best = min(
+            haversine_m(point, {'lat': lat, 'lon': lon})
+            for point in sampled
+            for lat, lon in pois
+        )
+        summary[category] = round(best)
+    return summary
+
+
+def _route_explanation(
+    path: Sequence[Dict[str, float]],
+    distance_m: float,
+    cost: float,
+    patient: Dict[str, Any],
+    preferences: Optional[Dict[str, float]],
+    poi_lists: Optional[Dict[str, List[Tuple[float, float]]]],
+    env_samples: Sequence[Dict[str, Any]],
+    walkability_summary: Optional[Dict[str, Any]],
+    data_sources: Dict[str, str],
+) -> Dict[str, Any]:
+    env_summary = _route_env_summary(env_samples)
+    nearest_pois = _nearest_poi_summary(path, poi_lists)
+    distance_penalty = max(0.0, cost - distance_m)
+    reasons = []
+    aq = env_summary.get('airQuality', {}).get('avg') if isinstance(env_summary.get('airQuality'), dict) else None
+    if aq is not None:
+        reasons.append(f'air quality avg {aq}')
+    slope = env_summary.get('slope', {}).get('avg') if isinstance(env_summary.get('slope'), dict) else None
+    if slope is not None:
+        reasons.append(f'slope avg {slope}%')
+    if nearest_pois:
+        for category, distance in nearest_pois.items():
+            if distance is not None:
+                reasons.append(f'nearest {category} {distance} m')
+    if walkability_summary and walkability_summary.get('penalty', 0) > 0:
+        reasons.append(f"walkability penalty {walkability_summary['penalty']}")
+    return {
+        'patient_profile': patient.get('name'),
+        'distance_m': round(distance_m),
+        'cost': round(cost, 1),
+        'distance_penalty': round(distance_penalty, 1),
+        'environment': env_summary,
+        'nearest_pois_m': nearest_pois,
+        'walkability': walkability_summary or {'penalty': 0.0, 'hits': [], 'feature_count': 0},
+        'data_sources': data_sources,
+        'preference_weights': preferences or {},
+        'reasons': reasons[:8],
+    }
 
 
 def _generate_graphhopper_routes(
@@ -786,14 +1116,17 @@ def _generate_graphhopper_routes(
     if not isinstance(graphhopper_paths, list) or not graphhopper_paths:
         return None
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
     try:
         poi_future = executor.submit(_fetch_poi_lists_parallel, bbox, active_categories)
         env_future = executor.submit(_prefetch_environment_samples, start, goal)
+        walkability_future = executor.submit(_fetch_walkability_features, bbox)
         input_deadline = time.perf_counter() + BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS
         poi_lists, poi_sources = poi_future.result(timeout=BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS)
         remaining = max(0.1, input_deadline - time.perf_counter())
         env_samples = env_future.result(timeout=remaining)
+        remaining = max(0.1, input_deadline - time.perf_counter())
+        walkability_features, walkability_source = walkability_future.result(timeout=remaining)
     except concurrent.futures.TimeoutError as exc:
         raise TimeoutError('GraphHopper candidate scoring lookup timed out') from exc
     finally:
@@ -804,6 +1137,8 @@ def _generate_graphhopper_routes(
         for category, pois in poi_lists.items():
             if pois:
                 data_sources[f'poi_{category}'] = poi_sources.get(category, 'unknown')
+    if walkability_features and walkability_source:
+        data_sources['walkability'] = walkability_source
     data_sources['street_graph'] = 'GraphHopper local OSM graph'
 
     green_scale = tolerance_green_scale(distance_tolerance)
@@ -815,11 +1150,11 @@ def _generate_graphhopper_routes(
             continue
         path[0] = {'lat': start['lat'], 'lon': start['lon']}
         path[-1] = {'lat': goal['lat'], 'lon': goal['lon']}
+        distance = _safe_float(raw.get('distance')) or calculate_path_length(path)
         signature = _path_signature(path, precision=5)
-        if signature in signatures:
+        if signature in signatures or _is_similar_route(path, distance, routes):
             continue
         signatures.add(signature)
-        distance = _safe_float(raw.get('distance')) or calculate_path_length(path)
         cost = _score_candidate_path(
             path,
             patient,
@@ -828,7 +1163,17 @@ def _generate_graphhopper_routes(
             env_samples,
             green_scale,
             distance,
+            walkability_features,
+            mode,
         )
+        walkability_penalty, walkability_summary = _score_walkability_for_path(
+            path,
+            walkability_features,
+            patient,
+            mode,
+        )
+        if walkability_penalty:
+            walkability_summary['penalty'] = round(walkability_penalty, 1)
         routes.append({
             'name': 'GraphHopper Environmental Route' if not routes else f'GraphHopper Environmental Alternative {len(routes) + 1}',
             'routing_basis': 'graphhopper_osm',
@@ -844,6 +1189,17 @@ def _generate_graphhopper_routes(
             'duration_s': round((_safe_float(raw.get('time')) or 0) / 1000),
             'env_score': round(max(0.0, 100.0 - cost / 100.0), 1),
             'data_sources': data_sources,
+            'explanation': _route_explanation(
+                path,
+                distance,
+                cost,
+                patient,
+                preferences,
+                poi_lists,
+                env_samples,
+                walkability_summary,
+                data_sources,
+            ),
         })
 
     routes.sort(key=lambda route: route['astar_cost'])
@@ -912,7 +1268,7 @@ def generate_backend_astar_routes(
     if GRAPHHOPPER_URL and GRAPHHOPPER_FORCE:
         raise RuntimeError('GraphHopper is configured but did not return usable routes')
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
     try:
         street_future = executor.submit(
             fetch_street_graph,
@@ -925,10 +1281,13 @@ def generate_backend_astar_routes(
             max_mirrors=BACKEND_ASTAR_OVERPASS_MAX_MIRRORS,
         )
         poi_future = executor.submit(_fetch_poi_lists_parallel, bbox, active_categories)
+        walkability_future = executor.submit(_fetch_walkability_features, bbox)
         input_deadline = time.perf_counter() + BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS
         street_payload = street_future.result(timeout=BACKEND_ASTAR_INPUT_TIMEOUT_SECONDS)
         remaining = max(0.1, input_deadline - time.perf_counter())
         poi_lists, poi_sources = poi_future.result(timeout=remaining)
+        remaining = max(0.1, input_deadline - time.perf_counter())
+        walkability_features, walkability_source = walkability_future.result(timeout=remaining)
     except concurrent.futures.TimeoutError as exc:
         raise TimeoutError('backend A* data lookup timed out') from exc
     finally:
@@ -956,13 +1315,22 @@ def generate_backend_astar_routes(
                 env_samples,
                 node_penalties,
                 green_scale,
+                walkability_features,
+                mode,
             )
             if not result:
                 break
             signature = _path_signature(result['path'])
-            if signature not in signatures:
+            distance = calculate_path_length(result['path'])
+            if signature not in signatures and not _is_similar_route(result['path'], distance, routes):
                 signatures.add(signature)
                 route_index = len(routes)
+                walkability_penalty, walkability_summary = _score_walkability_for_path(
+                    result['path'],
+                    walkability_features,
+                    patient,
+                    mode,
+                )
                 routes.append({
                     'name': 'Backend Environmental A* Route' if route_index == 0 else f'Backend Environmental A* Alternative {route_index + 1}',
                     'routing_basis': 'street_graph',
@@ -974,6 +1342,18 @@ def generate_backend_astar_routes(
                     'expansions': result['expansions'],
                     'signature': signature,
                     'path_node_count': len(result['path']),
+                    'distance_m': round(distance),
+                    'explanation': _route_explanation(
+                        result['path'],
+                        distance,
+                        result['astar_cost'],
+                        patient,
+                        preferences,
+                        poi_lists,
+                        env_samples,
+                        walkability_summary,
+                        {},
+                    ),
                 })
                 _add_route_penalties(node_penalties, result['path'], graph)
                 accepted = True
@@ -987,11 +1367,15 @@ def generate_backend_astar_routes(
         for category, pois in poi_lists.items():
             if pois:
                 data_sources[f'poi_{category}'] = poi_sources.get(category, 'unknown')
+    if walkability_features and walkability_source:
+        data_sources['walkability'] = walkability_source
     data_sources['street_graph'] = base_graph['source']
 
     def score_route(route: Dict[str, Any]) -> Dict[str, Any]:
         route['env_score'] = round(max(0.0, 100.0 - (route.get('astar_cost') or 0.0) / 100.0), 1)
         route['data_sources'] = data_sources
+        if route.get('explanation'):
+            route['explanation']['data_sources'] = data_sources
         return route
 
     if routes:

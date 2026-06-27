@@ -123,6 +123,7 @@ function convertBackendAstarRoutesToPlannerFormat(payload, patientCondition, tra
             astarInternalCost: route.astar_cost,
             astarPathNodeCount: route.path_node_count,
             backendEnvScore: route.env_score,
+            backendExplanation: route.explanation || null,
             backendTimingMs: payload.timing_ms,
             backendParallelism: payload.parallelism,
             astarAlternativeSignature: route.signature || `backend-astar-${index}`,

@@ -121,6 +121,129 @@ def test_backend_astar_uses_graphhopper_when_configured(monkeypatch):
     assert payload['routes'][0]['path'][0] == {'lat': 44.0, 'lon': 10.0}
     assert payload['routes'][0]['path'][-1] == {'lat': 44.001, 'lon': 10.001}
     assert payload['street_graph']['source'] == 'GraphHopper local OSM graph'
+    assert payload['routes'][0]['explanation']['environment']['sample_count'] >= 1
+
+
+def test_environment_sampling_is_adaptive_for_route_length():
+    short = ba._sample_environment_points(
+        {'lat': 44.0, 'lon': 10.0},
+        {'lat': 44.01, 'lon': 10.0},
+        max_samples=9,
+    )
+    medium = ba._sample_environment_points(
+        {'lat': 44.0, 'lon': 10.0},
+        {'lat': 44.05, 'lon': 10.0},
+        max_samples=9,
+    )
+    long = ba._sample_environment_points(
+        {'lat': 44.0, 'lon': 10.0},
+        {'lat': 44.20, 'lon': 10.0},
+        max_samples=9,
+    )
+
+    assert len(short) == 3
+    assert len(medium) == 5
+    assert len(long) == 9
+
+
+def test_backend_environment_cache_reuses_nearby_points(monkeypatch):
+    ba.reset_backend_astar_state()
+    calls = {'weather': 0, 'air': 0, 'slope': 0}
+
+    def fake_weather(lat, lon):
+        calls['weather'] += 1
+        return {
+            'temperature': 22,
+            'humidity': 50,
+            'weather': 1,
+            'windSpeed': 2,
+            'sources': {'temperature': 'test-weather'},
+        }
+
+    def fake_air(lat, lon):
+        calls['air'] += 1
+        return {'airQuality': 4, 'source': 'test-air', 'isDefault': False}
+
+    def fake_slope(lat, lon):
+        calls['slope'] += 1
+        return 1.5, 'test-slope'
+
+    monkeypatch.setattr(ba, '_fetch_open_meteo_weather', fake_weather)
+    monkeypatch.setattr(ba.air_quality_service, 'get_air_quality_data', fake_air)
+    monkeypatch.setattr(ba, '_fetch_slope', fake_slope)
+
+    first = ba._fetch_backend_environment_data(44.0001, 10.0001)
+    second = ba._fetch_backend_environment_data(44.0002, 10.0002)
+
+    assert first['cacheHit'] is False
+    assert second['cacheHit'] is True
+    assert calls == {'weather': 1, 'air': 1, 'slope': 1}
+
+
+def test_graphhopper_deduplicates_near_identical_alternatives(monkeypatch):
+    monkeypatch.setattr(ba, 'GRAPHHOPPER_URL', 'http://graphhopper.test')
+    monkeypatch.setattr(ba, '_graphhopper_route_payload', lambda *args, **kwargs: {
+        'paths': [
+            {
+                'distance': 180.0,
+                'time': 120000,
+                'points': {'coordinates': [[10.0, 44.0], [10.0005, 44.0005], [10.001, 44.001]]},
+            },
+            {
+                'distance': 181.0,
+                'time': 121000,
+                'points': {'coordinates': [[10.0, 44.0], [10.00051, 44.00051], [10.001, 44.001]]},
+            },
+        ],
+    })
+    monkeypatch.setattr(ba, 'fetch_named_pois', lambda *args, **kwargs: {'pois': [], 'source': 'mock'})
+    monkeypatch.setattr(ba, '_fetch_backend_environment_data', lambda lat, lon: _neutral_env())
+    monkeypatch.setattr(ba, '_fetch_walkability_features', lambda bbox: ([], None))
+
+    payload = ba.generate_backend_astar_routes(
+        44.0,
+        10.0,
+        44.001,
+        10.001,
+        condition='respiratory',
+        transport_mode='walking',
+        alternatives=2,
+    )
+
+    assert payload['count'] == 1
+
+
+def test_walkability_features_penalize_candidate_routes(monkeypatch):
+    monkeypatch.setattr(ba, 'GRAPHHOPPER_URL', 'http://graphhopper.test')
+    monkeypatch.setattr(ba, '_graphhopper_route_payload', lambda *args, **kwargs: {
+        'paths': [
+            {
+                'distance': 180.0,
+                'time': 120000,
+                'points': {'coordinates': [[10.0, 44.0], [10.0005, 44.0005], [10.001, 44.001]]},
+            },
+        ],
+    })
+    monkeypatch.setattr(ba, 'fetch_named_pois', lambda *args, **kwargs: {'pois': [], 'source': 'mock'})
+    monkeypatch.setattr(ba, '_fetch_backend_environment_data', lambda lat, lon: _neutral_env())
+    monkeypatch.setattr(ba, '_fetch_walkability_features', lambda bbox: ([
+        {'category': 'steps', 'kind': 'steps', 'lat': 44.0005, 'lon': 10.0005},
+    ], 'test-walkability'))
+
+    payload = ba.generate_backend_astar_routes(
+        44.0,
+        10.0,
+        44.001,
+        10.001,
+        condition='mobility',
+        transport_mode='walking',
+        alternatives=1,
+    )
+
+    route = payload['routes'][0]
+    assert route['data_sources']['walkability'] == 'test-walkability'
+    assert route['explanation']['walkability']['penalty'] > 0
+    assert route['explanation']['walkability']['hits'][0]['category'] == 'steps'
 
 
 def test_backend_astar_view_returns_503_when_real_osm_unavailable(monkeypatch):

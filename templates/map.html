@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
     <link href="{% static 'css/theme.css' %}" rel="stylesheet">
     <link href="{% static 'css/suggestions.css' %}" rel="stylesheet">
-    <link href="{% static 'css/map.css' %}?v=20260626-layer-routing" rel="stylesheet">
+    <link href="{% static 'css/map.css' %}?v=20260627-real-data-routing" rel="stylesheet">
 </head>
 <body>
     <div class="container-fluid map-shell" id="mapShell">
@@ -321,14 +321,14 @@
     <script src="{% static 'js/map.js' %}"></script>
     <script src="{% static 'js/markers.js' %}"></script>
     <script src="{% static 'js/master/preferences.js' %}" type="module"></script>
-    <script src="{% static 'js/routing.js' %}" type="module"></script>
+    <script src="{% static 'js/routing.js' %}?v=20260627-real-data-routing" type="module"></script>
     <script src="{% static 'js/routeStepSimulator.js' %}"></script>
     <script src="{% static 'js/environmentInspector.js' %}" type="module"></script>
     {% if benchmark_mode %}
     <script src="{% static 'js/benchmark/automation.js' %}" type="module"></script>
     {% endif %}
     <script src="{% static 'js/location.js' %}"></script>
-    <script src="{% static 'js/heatmap.js' %}?v=20260626-layer-routing"></script>
+    <script src="{% static 'js/heatmap.js' %}?v=20260627-real-data-routing"></script>
 
     <script>
         {% if messages %}

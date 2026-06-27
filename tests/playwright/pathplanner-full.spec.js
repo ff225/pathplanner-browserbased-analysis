@@ -12,6 +12,7 @@ const {
   gotoMap,
   mockLayerData,
   mockMapboxSearch,
+  mockRouteExposureData,
   runRealRoute,
   screenshotDir,
   setClinicalControls,
@@ -194,6 +195,7 @@ test.describe('PathPlanner full GUI regression', () => {
 
   test('real backend route renders deduplicated alternatives, source text, directions, and correct request params', async ({ page }) => {
     const problems = collectPageProblems(page);
+    await mockRouteExposureData(page);
     await gotoMap(page);
 
     const backendRequests = await runRealRoute(page, {
@@ -210,6 +212,8 @@ test.describe('PathPlanner full GUI regression', () => {
     expect(metrics.routesClippedBySelector).toBe(false);
     expect(metrics.stepCount).toBeGreaterThanOrEqual(3);
     expect(metrics.hasSummary).toBe(true);
+    expect(metrics.hasRouteExposure).toBe(true);
+    expect(metrics.routeExposureText).toMatch(/Route exposure|AQI|PM2\.5/i);
     expect(metrics.summaryMarginBottom).toBeGreaterThanOrEqual(18);
     expect(metrics.hasExplanationText).toBe(true);
     expect(metrics.pageScrollWidth).toBeLessThanOrEqual(metrics.viewportWidth + 2);
@@ -252,6 +256,7 @@ test.describe('PathPlanner full GUI regression', () => {
   test('route directions fit mobile and closing them restores layer access', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockLayerData(page);
+    await mockRouteExposureData(page);
     await gotoMap(page);
 
     await runRealRoute(page, {

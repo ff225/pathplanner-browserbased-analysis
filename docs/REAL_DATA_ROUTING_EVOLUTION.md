@@ -1234,6 +1234,15 @@ Air-quality layers are rendered as city-view heat surfaces:
   real air-quality samples instead of only sampling a tight cross around the map
   center.
 
+Selected routes now also get a route-specific exposure summary:
+
+- the directions panel samples up to 10 points along the selected path through
+  `/api/environment`;
+- the lookup is asynchronous and does not block route rendering;
+- the panel shows route-level AQI, PM2.5, NO2, O3, and pollen when available;
+- the selected route line is recolored green/amber/red from the route exposure
+  level, while the path remains usable if the exposure lookup times out.
+
 This avoids hiding useful demo controls while making the product meaning clearer:
 route styles describe a user's preferred route character, while clinical profiles
 describe health-aware constraints.

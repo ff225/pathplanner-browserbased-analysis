@@ -80,16 +80,18 @@ function getRouteBaseColor(route) {
         : getThemeColor('--route-optimized', '#16a34a');
 }
 
-function getRouteSelectedColor() {
-    return getThemeColor('--route-primary-strong', getThemeColor('--route-primary', '#f59e0b'));
+function getRouteSelectedColor(route) {
+    return route?.routeExposure?.color ||
+        getThemeColor('--route-primary-strong', getThemeColor('--route-primary', '#f59e0b'));
 }
 
 function getRouteLineStyles(route, isSelected) {
+    const selectedColor = getRouteSelectedColor(route);
     if (isSelected) {
         return [
             { color: getThemeColor('--route-selected-outline', '#111827'), opacity: 0.45, weight: 12 },
             { color: getThemeColor('--route-selected-halo', '#ffffff'), opacity: 0.95, weight: 9 },
-            { color: getRouteSelectedColor(), opacity: 1, weight: 6 }
+            { color: selectedColor, opacity: 1, weight: 6 }
         ];
     }
 
@@ -104,7 +106,7 @@ function getRouteLineStyles(route, isSelected) {
 function getRouteLineStyle(route, isSelected) {
     if (isSelected) {
         return {
-            color: getRouteSelectedColor(),
+            color: getRouteSelectedColor(route),
             weight: 8,
             opacity: 1,
             lineCap: 'round',
@@ -644,6 +646,221 @@ function updateRouteDirectionsPanel(route, directionsPanel) {
     renderRouteDirections(route, directionsPanel);
 }
 
+const ROUTE_EXPOSURE_MAX_POINTS = 10;
+const ROUTE_EXPOSURE_TIMEOUT_MS = 9000;
+
+function escapeHtml(value) {
+    return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function routeExposureColor(level) {
+    if (level === 'high') return '#ef4444';
+    if (level === 'medium') return '#f59e0b';
+    if (level === 'low') return '#22c55e';
+    return getRouteSelectedColor();
+}
+
+function routeExposureLevelFromAqi(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 'unknown';
+    if (numeric >= 75) return 'high';
+    if (numeric >= 40) return 'medium';
+    return 'low';
+}
+
+function routeExposureLabel(level) {
+    if (level === 'high') return 'High exposure';
+    if (level === 'medium') return 'Medium exposure';
+    if (level === 'low') return 'Lower exposure';
+    return 'Exposure N/D';
+}
+
+function readPollutantValue(point, key) {
+    const pollutant = point?.pollutants?.[key];
+    const value = pollutant?.value;
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function meanNumeric(values) {
+    const valid = values.map(Number).filter(Number.isFinite);
+    if (!valid.length) return null;
+    return valid.reduce((sum, value) => sum + value, 0) / valid.length;
+}
+
+function formatExposureNumber(value, unit = '') {
+    if (!Number.isFinite(Number(value))) return 'N/D';
+    const rounded = Math.round(Number(value) * 10) / 10;
+    const text = Math.abs(rounded % 1) < 0.001 ? rounded.toFixed(0) : rounded.toFixed(1);
+    return unit ? `${text} ${unit}` : text;
+}
+
+function getRouteExposureCoordinates(route) {
+    const coords = getNormalizedRouteLatLonCoordinates(route);
+    if (!coords.length) return [];
+    if (coords.length <= ROUTE_EXPOSURE_MAX_POINTS) {
+        return coords;
+    }
+    const sampled = [];
+    for (let i = 0; i < ROUTE_EXPOSURE_MAX_POINTS; i++) {
+        const index = Math.round((i * (coords.length - 1)) / (ROUTE_EXPOSURE_MAX_POINTS - 1));
+        sampled.push(coords[index]);
+    }
+    return sampled;
+}
+
+function selectedPathologyForExposure() {
+    const selected = document.getElementById('patientCondition')?.value || 'default';
+    return selected === 'none' ? 'default' : selected;
+}
+
+function buildRouteExposureUrl(route) {
+    const coords = getRouteExposureCoordinates(route);
+    if (!coords.length) return null;
+    const waypointString = coords
+        .map(point => `${Number(point.lat).toFixed(6)},${Number(point.lng).toFixed(6)}`)
+        .join(';');
+    const params = new URLSearchParams({
+        waypoints: waypointString,
+        condition: selectedPathologyForExposure()
+    });
+    return `/api/environment?${params.toString()}`;
+}
+
+function summarizeRouteExposure(payload) {
+    const points = Array.isArray(payload?.points) ? payload.points : [];
+    const available = points.filter(point => point?.status === 'available');
+    if (!available.length) {
+        return {
+            status: 'unavailable',
+            level: 'unknown',
+            color: routeExposureColor('unknown'),
+            label: 'Exposure N/D',
+            detail: 'No route exposure samples available.',
+            metrics: []
+        };
+    }
+
+    const aqi = meanNumeric(available.map(point => point?.overall_aqi?.value));
+    const pm25 = meanNumeric(available.map(point => readPollutantValue(point, 'pm2_5')));
+    const no2 = meanNumeric(available.map(point => readPollutantValue(point, 'nitrogen_dioxide')));
+    const ozone = meanNumeric(available.map(point => readPollutantValue(point, 'ozone')));
+    const pollen = meanNumeric(available.flatMap(point => [
+        readPollutantValue(point, 'grass_pollen'),
+        readPollutantValue(point, 'birch_pollen'),
+        readPollutantValue(point, 'olive_pollen'),
+        readPollutantValue(point, 'ragweed_pollen')
+    ]).filter(value => value !== null));
+    const level = routeExposureLevelFromAqi(aqi);
+    const metrics = [
+        { label: 'AQI', value: formatExposureNumber(aqi) },
+        { label: 'PM2.5', value: formatExposureNumber(pm25, 'µg/m³') },
+        { label: 'NO₂', value: formatExposureNumber(no2, 'µg/m³') },
+        { label: 'O₃', value: formatExposureNumber(ozone, 'µg/m³') }
+    ];
+    if (pollen !== null) {
+        metrics.push({ label: 'Pollen', value: formatExposureNumber(pollen, 'grains/m³') });
+    }
+
+    return {
+        status: 'available',
+        level,
+        color: routeExposureColor(level),
+        label: routeExposureLabel(level),
+        detail: `${available.length}/${points.length || available.length} real route samples`,
+        metrics
+    };
+}
+
+function routeExposureCardHtml(exposure) {
+    const state = exposure || { status: 'loading', level: 'unknown', label: 'Loading exposure', detail: 'Sampling environmental data along this path...', metrics: [] };
+    const metrics = Array.isArray(state.metrics) && state.metrics.length
+        ? state.metrics.map(metric => (
+            `<span class="route-exposure-metric"><strong>${escapeHtml(metric.label)}</strong>${escapeHtml(metric.value)}</span>`
+        )).join('')
+        : '<span class="route-exposure-metric"><strong>Status</strong>N/D</span>';
+    return `
+        <div class="route-exposure-card route-exposure-card--${escapeHtml(state.level || 'unknown')}">
+            <div class="route-exposure-heading">
+                <span class="route-exposure-kicker">Route exposure</span>
+                <strong>${escapeHtml(state.label || 'Exposure N/D')}</strong>
+            </div>
+            <div class="route-exposure-metrics">${metrics}</div>
+            <div class="route-exposure-detail">${escapeHtml(state.detail || '')}</div>
+        </div>
+    `;
+}
+
+function renderRouteExposureSummary(route, summary) {
+    if (!summary || !route) return;
+    let host = summary.querySelector('.route-exposure-host');
+    if (!host) {
+        host = document.createElement('div');
+        host.className = 'route-exposure-host';
+        summary.appendChild(host);
+    }
+    host.innerHTML = routeExposureCardHtml(route.routeExposure);
+}
+
+async function fetchRouteExposure(route, summary) {
+    if (!route || route.routeExposure?.status === 'available' || route.routeExposure?.status === 'unavailable') {
+        if (summary) renderRouteExposureSummary(route, summary);
+        return;
+    }
+    const url = buildRouteExposureUrl(route);
+    if (!url) {
+        route.routeExposure = summarizeRouteExposure(null);
+        renderRouteExposureSummary(route, summary);
+        return;
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    route._routeExposureRequestId = requestId;
+    route.routeExposure = {
+        status: 'loading',
+        level: 'unknown',
+        color: routeExposureColor('unknown'),
+        label: 'Loading exposure',
+        detail: 'Sampling environmental data along this path...',
+        metrics: []
+    };
+    renderRouteExposureSummary(route, summary);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ROUTE_EXPOSURE_TIMEOUT_MS);
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error || `route exposure failed (${response.status})`);
+        }
+        if (route._routeExposureRequestId !== requestId) return;
+        route.routeExposure = summarizeRouteExposure(payload);
+        applyRouteLineStyle(route, true);
+        renderRouteExposureSummary(route, summary);
+    } catch (error) {
+        if (route._routeExposureRequestId !== requestId) return;
+        route.routeExposure = {
+            status: 'unavailable',
+            level: 'unknown',
+            color: routeExposureColor('unknown'),
+            label: 'Exposure N/D',
+            detail: error?.name === 'AbortError'
+                ? 'Route exposure lookup timed out; route remains usable.'
+                : 'Route exposure data is unavailable; route remains usable.',
+            metrics: []
+        };
+        applyRouteLineStyle(route, true);
+        renderRouteExposureSummary(route, summary);
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 function renderDirectionsSidebar(route) {
     const panel = document.getElementById('directionsPanel');
     const list = document.getElementById('directionsList');
@@ -667,6 +884,8 @@ function renderDirectionsSidebar(route) {
             span.textContent = text;
             summary.appendChild(span);
         });
+        renderRouteExposureSummary(route, summary);
+        fetchRouteExposure(route, summary);
     }
 
     list.innerHTML = '';

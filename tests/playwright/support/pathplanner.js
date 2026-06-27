@@ -188,6 +188,75 @@ async function mockLayerData(page) {
   });
 }
 
+async function mockRouteExposureData(page) {
+  await page.route('**/api/environment?**', async (route) => {
+    const url = new URL(route.request().url());
+    const waypoints = (url.searchParams.get('waypoints') || '')
+      .split(';')
+      .map((raw) => raw.split(',').map(Number))
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    const points = (waypoints.length ? waypoints : [[START_MODENA.lat, START_MODENA.lon]]).map(([lat, lon], index) => ({
+      lat,
+      lon,
+      status: 'available',
+      overall_aqi: {
+        key: 'european_aqi',
+        value: 28 + index,
+        unit: 'EAQI',
+        source: 'mock route exposure',
+        timestamp: '2026-06-28T00:00:00Z',
+        status: 'ok',
+      },
+      pollutants: {
+        european_aqi: {
+          key: 'european_aqi',
+          value: 28 + index,
+          unit: 'EAQI',
+          source: 'mock route exposure',
+          timestamp: '2026-06-28T00:00:00Z',
+          status: 'ok',
+        },
+        pm2_5: {
+          key: 'pm2_5',
+          value: 7.5 + index / 10,
+          unit: 'ug/m3',
+          source: 'mock route exposure',
+          timestamp: '2026-06-28T00:00:00Z',
+          status: 'ok',
+        },
+        nitrogen_dioxide: {
+          key: 'nitrogen_dioxide',
+          value: 12 + index / 10,
+          unit: 'ug/m3',
+          source: 'mock route exposure',
+          timestamp: '2026-06-28T00:00:00Z',
+          status: 'ok',
+        },
+        ozone: {
+          key: 'ozone',
+          value: 80 + index / 5,
+          unit: 'ug/m3',
+          source: 'mock route exposure',
+          timestamp: '2026-06-28T00:00:00Z',
+          status: 'ok',
+        },
+      },
+    }));
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'available',
+        generated_at: '2026-06-28T00:00:00Z',
+        pathologies: ['respiratory'],
+        relevant_pollutants: ['european_aqi', 'pm2_5', 'nitrogen_dioxide', 'ozone'],
+        points,
+      }),
+    });
+  });
+}
+
 async function collectLayoutMetrics(page) {
   return page.evaluate(() => {
     const visible = (element) => {
@@ -198,6 +267,7 @@ async function collectLayoutMetrics(page) {
     };
     const panel = document.getElementById('directionsPanel');
     const summary = document.getElementById('directionsSummary');
+    const exposureCard = document.querySelector('.route-exposure-card');
     const routeCards = [...document.querySelectorAll('.directions-route-card, .route-item')].filter(visible);
     const steps = [...document.querySelectorAll('.directions-step, .turn-directions-step')].filter(visible);
     const routeTexts = routeCards.map((card) => card.textContent.replace(/\s+/g, ' ').trim());
@@ -216,6 +286,8 @@ async function collectLayoutMetrics(page) {
       routesClippedBySelector: Boolean(selectorRect && lastRouteRect && lastRouteRect.bottom > selectorRect.bottom + 1),
       hasExplanationText: routeTexts.some((text) => /GraphHopper|OSM|OpenStreetMap|SQLite|Backend|dati reali|real data/i.test(text)),
       hasSummary: !!summary && visible(summary),
+      hasRouteExposure: !!exposureCard && visible(exposureCard),
+      routeExposureText: exposureCard ? exposureCard.textContent.replace(/\s+/g, ' ').trim() : '',
       summaryMarginBottom: summary ? parseFloat(getComputedStyle(summary).marginBottom) : 0,
       pageScrollWidth: document.documentElement.scrollWidth,
       viewportWidth: window.innerWidth,
@@ -270,6 +342,7 @@ module.exports = {
   gotoMap,
   mockLayerData,
   mockMapboxSearch,
+  mockRouteExposureData,
   runRealRoute,
   screenshotDir,
   setClinicalControls,

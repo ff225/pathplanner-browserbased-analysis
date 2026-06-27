@@ -76,7 +76,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#2563eb',
             emptyMessage: 'No PM2.5 readings are available in the latest station dataset.',
             meaning: 'Fine particulate matter (≤2.5 µm) that can travel deep into the lungs.',
-            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
+            source: 'Real point measurements interpolated across the city view as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         pm10: {
             label: 'PM10',
@@ -87,7 +87,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#7c3aed',
             emptyMessage: 'No PM10 readings are available in the latest station dataset.',
             meaning: 'Inhalable particulate matter (≤10 µm), often from dust, traffic, and combustion.',
-            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
+            source: 'Real point measurements interpolated across the city view as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         no2: {
             label: 'NO₂',
@@ -98,7 +98,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#dc2626',
             emptyMessage: 'No NO₂ readings are available in the latest station dataset.',
             meaning: 'Nitrogen dioxide, mainly tied to combustion and roadside traffic pollution.',
-            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
+            source: 'Real point measurements interpolated across the city view as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         o3: {
             label: 'O₃',
@@ -109,7 +109,7 @@ document.addEventListener("DOMContentLoaded", function() {
             markerColor: '#ea580c',
             emptyMessage: 'No O₃ readings are available in the latest station dataset.',
             meaning: 'Ground-level ozone, a secondary pollutant that often rises on sunny stagnant days.',
-            source: 'Real station measurements normalized as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
+            source: 'Real point measurements interpolated across the city view as health risk. Cooler blue/green is lower exposure; amber/red is higher exposure.'
         },
         pollen: {
             label: 'Pollen',
@@ -132,32 +132,10 @@ document.addEventListener("DOMContentLoaded", function() {
         sourceLabel: 'stations'
     };
 
-    // Deterministic station spread: measurement intensity is real, positions are
-    // fixed interpolation samples around the station so the heatmap is readable.
-    var STATION_SPREAD_OFFSETS = (function() {
-        var offsets = [];
-        var rings = [250, 550, 900, 1250];
-        rings.forEach(function(radius, ringIndex) {
-            var count = 8 + ringIndex * 4;
-            for (var k = 0; k < count; k++) {
-                var angle = (2 * Math.PI * k) / count;
-                offsets.push([radius * Math.cos(angle), radius * Math.sin(angle)]);
-            }
-        });
-        return offsets;
-    })();
-
-    var AIR_SAMPLE_OFFSETS = [
-        [0, 0],
-        [650, 0],
-        [-650, 0],
-        [0, 650],
-        [0, -650],
-        [920, 920],
-        [-920, 920],
-        [920, -920],
-        [-920, -920]
-    ];
+    var AIR_SAMPLE_GRID_SIZE = 4;
+    var CITY_HEAT_GRID_SIZE = 8;
+    var CITY_HEAT_RADIUS_M = 7000;
+    var MAX_AIR_SAMPLE_SPAN_M = 16000;
 
     function initializeLayerStates() {
         ALL_LAYER_IDS.forEach(function(layerId) {
@@ -231,11 +209,147 @@ document.addEventListener("DOMContentLoaded", function() {
         ];
     }
 
-    function buildStationSpread(centerLat, centerLng, intensity) {
-        return STATION_SPREAD_OFFSETS.map(function(offset) {
-            var point = offsetPoint(centerLat, centerLng, offset[0], offset[1]);
-            return [point[0], point[1], intensity * 0.55];
+    function distanceMetres(a, b) {
+        var lat1 = a.lat * Math.PI / 180;
+        var lat2 = b.lat * Math.PI / 180;
+        var dLat = (b.lat - a.lat) * Math.PI / 180;
+        var dLng = (b.lng - a.lng) * Math.PI / 180;
+        var sinLat = Math.sin(dLat / 2);
+        var sinLng = Math.sin(dLng / 2);
+        var h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+        return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function cityBoundsAround(center, radiusM) {
+        var north = offsetPoint(center.lat, center.lon, 0, radiusM);
+        var south = offsetPoint(center.lat, center.lon, 0, -radiusM);
+        var east = offsetPoint(center.lat, center.lon, radiusM, 0);
+        var west = offsetPoint(center.lat, center.lon, -radiusM, 0);
+        return {
+            north: north[0],
+            south: south[0],
+            east: east[1],
+            west: west[1]
+        };
+    }
+
+    function mapBoundsAsPlainObject() {
+        if (!map.getBounds) {
+            return null;
+        }
+        var bounds = map.getBounds();
+        if (!bounds || !bounds.getNorth || !bounds.getSouth || !bounds.getEast || !bounds.getWest) {
+            return null;
+        }
+        return {
+            north: bounds.getNorth(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            west: bounds.getWest()
+        };
+    }
+
+    function boundsSpanMetres(bounds) {
+        var centerLat = (bounds.north + bounds.south) / 2;
+        return {
+            height: distanceMetres({ lat: bounds.south, lng: bounds.west }, { lat: bounds.north, lng: bounds.west }),
+            width: distanceMetres({ lat: centerLat, lng: bounds.west }, { lat: centerLat, lng: bounds.east })
+        };
+    }
+
+    function citySizedAirBounds() {
+        var center = resolveAirLayerCenter();
+        var visibleBounds = mapBoundsAsPlainObject();
+        if (!visibleBounds) {
+            return cityBoundsAround(center, CITY_HEAT_RADIUS_M);
+        }
+
+        var span = boundsSpanMetres(visibleBounds);
+        if (span.height <= MAX_AIR_SAMPLE_SPAN_M && span.width <= MAX_AIR_SAMPLE_SPAN_M) {
+            return visibleBounds;
+        }
+        return cityBoundsAround(center, CITY_HEAT_RADIUS_M);
+    }
+
+    function expandBounds(bounds, padRatio) {
+        var latPad = Math.max((bounds.north - bounds.south) * padRatio, 0.012);
+        var lngPad = Math.max((bounds.east - bounds.west) * padRatio, 0.012);
+        return {
+            north: bounds.north + latPad,
+            south: bounds.south - latPad,
+            east: bounds.east + lngPad,
+            west: bounds.west - lngPad
+        };
+    }
+
+    function boundsFromSourcePoints(points) {
+        var bounds = null;
+        points.forEach(function(point) {
+            if (!bounds) {
+                bounds = { north: point.lat, south: point.lat, east: point.lng, west: point.lng };
+                return;
+            }
+            bounds.north = Math.max(bounds.north, point.lat);
+            bounds.south = Math.min(bounds.south, point.lat);
+            bounds.east = Math.max(bounds.east, point.lng);
+            bounds.west = Math.min(bounds.west, point.lng);
         });
+        return bounds;
+    }
+
+    function buildGridPoints(bounds, gridSize) {
+        var points = [];
+        var rows = Math.max(2, gridSize);
+        var cols = Math.max(2, gridSize);
+        for (var row = 0; row < rows; row++) {
+            var latRatio = rows === 1 ? 0.5 : row / (rows - 1);
+            var lat = bounds.south + (bounds.north - bounds.south) * latRatio;
+            for (var col = 0; col < cols; col++) {
+                var lngRatio = cols === 1 ? 0.5 : col / (cols - 1);
+                var lng = bounds.west + (bounds.east - bounds.west) * lngRatio;
+                points.push({ lat: lat, lon: lng });
+            }
+        }
+        return points;
+    }
+
+    function buildInterpolatedHeatData(sourcePoints) {
+        if (!sourcePoints.length) {
+            return [];
+        }
+
+        var sourceBounds = boundsFromSourcePoints(sourcePoints);
+        var bounds = expandBounds(sourceBounds || citySizedAirBounds(), 0.55);
+        var heatData = [];
+
+        buildGridPoints(bounds, CITY_HEAT_GRID_SIZE).forEach(function(gridPoint) {
+            var target = { lat: gridPoint.lat, lng: gridPoint.lon };
+            var numerator = 0;
+            var denominator = 0;
+            var directIntensity = null;
+
+            sourcePoints.forEach(function(sourcePoint) {
+                var metres = distanceMetres(target, sourcePoint);
+                if (metres < 120) {
+                    directIntensity = Math.max(directIntensity || 0, sourcePoint.intensity);
+                    return;
+                }
+                var weight = 1 / Math.pow(Math.max(metres, 120), 1.7);
+                numerator += sourcePoint.intensity * weight;
+                denominator += weight;
+            });
+
+            var intensity = directIntensity !== null ? directIntensity : (denominator ? numerator / denominator : 0);
+            if (intensity > 0) {
+                heatData.push([target.lat, target.lng, Math.max(0.04, intensity * 0.88)]);
+            }
+        });
+
+        sourcePoints.forEach(function(point) {
+            heatData.push([point.lat, point.lng, point.intensity]);
+        });
+
+        return heatData;
     }
 
     function recordStats(stats, value) {
@@ -777,11 +891,13 @@ document.addEventListener("DOMContentLoaded", function() {
         var heatDataByLayer = {};
         var markersByLayer = {};
         var statsByLayer = {};
+        var sourcePointsByLayer = {};
 
         AIR_LAYER_IDS.forEach(function(layerId) {
             heatDataByLayer[layerId] = [];
             markersByLayer[layerId] = [];
             statsByLayer[layerId] = { count: 0, min: null, max: null };
+            sourcePointsByLayer[layerId] = [];
         });
 
         data.forEach(function(stazione) {
@@ -801,11 +917,11 @@ document.addEventListener("DOMContentLoaded", function() {
                 }
 
                 var intensity = normalizeToUnit(value, LAYER_CONFIG[layerId].referenceMax, 0.06);
-                heatDataByLayer[layerId].push([position.lat, position.lng, intensity]);
-                Array.prototype.push.apply(
-                    heatDataByLayer[layerId],
-                    buildStationSpread(position.lat, position.lng, intensity)
-                );
+                sourcePointsByLayer[layerId].push({
+                    lat: position.lat,
+                    lng: position.lng,
+                    intensity: intensity
+                });
                 markersByLayer[layerId].push(marker);
                 recordStats(statsByLayer[layerId], value);
             });
@@ -814,6 +930,7 @@ document.addEventListener("DOMContentLoaded", function() {
         AIR_LAYER_IDS.forEach(function(layerId) {
             var stats = statsByLayer[layerId];
             layerMarkers[layerId] = markersByLayer[layerId];
+            heatDataByLayer[layerId] = buildInterpolatedHeatData(sourcePointsByLayer[layerId]);
 
             if (heatDataByLayer[layerId].length) {
                 heatLayers[layerId] = L.heatLayer(heatDataByLayer[layerId], baseHeatOptions);
@@ -870,13 +987,9 @@ document.addEventListener("DOMContentLoaded", function() {
     }
 
     function fetchSampledAirQualityLayers() {
-        var center = resolveAirLayerCenter();
-        var samplePoints = AIR_SAMPLE_OFFSETS.map(function(offset) {
-            var point = offsetPoint(center.lat, center.lon, offset[0], offset[1]);
-            return { lat: point[0], lon: point[1] };
-        });
+        var samplePoints = buildGridPoints(citySizedAirBounds(), AIR_SAMPLE_GRID_SIZE);
 
-        renderLayerUI('No saved station readings found. Loading real air-quality samples for the current map area...');
+        renderLayerUI('No saved station readings found. Loading real air-quality samples across the visible city area...');
 
         return Promise.all(samplePoints.map(function(point, index) {
             var url = '/api/air_quality/?lat=' + encodeURIComponent(point.lat) +

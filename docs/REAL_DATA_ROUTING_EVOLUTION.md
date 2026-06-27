@@ -1225,6 +1225,15 @@ The map UI now keeps the preference presets, but presents them as route styles:
 - signup now collects first name, last name, email, and default clinical
   condition so new profiles are not empty on the map/profile screens.
 
+Air-quality layers are rendered as city-view heat surfaces:
+
+- marker positions remain the real station/sample points;
+- heat colors are interpolated from those real point values so the visual layer
+  covers the city instead of showing isolated bubbles around each station;
+- when no saved station rows exist, the frontend requests a capped city grid of
+  real air-quality samples instead of only sampling a tight cross around the map
+  center.
+
 This avoids hiding useful demo controls while making the product meaning clearer:
 route styles describe a user's preferred route character, while clinical profiles
 describe health-aware constraints.

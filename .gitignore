@@ -48,3 +48,11 @@ uploads/
 pathplanner_comparison_browser_*.csv
 benchmark_od_pairs_run*.json
 postprocess_summary.txt
+
+# Local OSM / GraphHopper runtime data (large, reproducible from downloads)
+pbf/
+runtime/graphhopper/graphs/
+runtime/graphhopper/lib/
+runtime/graphhopper/*.pid
+runtime/graphhopper/*.log
+runtime/graphhopper/config/config-example.yml

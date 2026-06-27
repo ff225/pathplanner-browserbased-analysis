@@ -37,3 +37,61 @@ Behavior:
 
 This is not a city cache. The routing graph comes from an OSM extract chosen for
 the demo/runtime, and the app still works with any city covered by that extract.
+
+## Local demo imports
+
+Local files currently tested under `pbf/`:
+
+| Region | PBF | Import result | Graph size | Direct route API |
+| --- | --- | ---: | ---: | ---: |
+| London | `greater-london-260626.osm.pbf` | ~10 s | 79 MB | ~8-82 ms |
+| New York | `new-york-260626.osm.pbf` | ~33 s | 317 MB | ~93 ms |
+| Italy | `italy-260626.osm.pbf` | ~2 min 35 s | 1.2 GB | ~69 ms for Modena |
+
+Start a tested region:
+
+```bash
+scripts/start_graphhopper.sh italy
+```
+
+Or run it as a detached Docker container:
+
+```bash
+docker rm -f pathplanner-graphhopper-italy >/dev/null 2>&1 || true
+docker run -d --name pathplanner-graphhopper-italy \
+  -p 127.0.0.1:8989:8989 \
+  -p 127.0.0.1:8990:8990 \
+  -v "$PWD:/work" \
+  -w /work \
+  eclipse-temurin:17-jre \
+  java -Xmx10g \
+    -Ddw.graphhopper.datareader.file=/work/pbf/italy-260626.osm.pbf \
+    -Ddw.graphhopper.graph.location=/work/runtime/graphhopper/graphs/italy-gh9 \
+    -jar /work/runtime/graphhopper/lib/graphhopper-web-9.1.jar \
+    server /work/runtime/graphhopper/config/pathplanner-demo.yml
+```
+
+Then run the Django app with:
+
+```env
+GRAPHHOPPER_URL=http://host.docker.internal:8989
+```
+
+Observed backend end-to-end timings are still around 4 seconds for clinical
+routes because PathPlanner adds environmental samples and POI scoring after
+GraphHopper returns route candidates. GraphHopper itself returns the road route
+in milliseconds, so the remaining latency is now in POI/environment scoring, not
+road-graph acquisition.
+
+## POI locality
+
+Parks and hospitals can also be moved off public Overpass. The clean production
+route is importing the same OSM extracts into a local POI store such as PostGIS
+or a lightweight extracted SQLite table:
+
+- parks: `leisure=park`, `landuse=grass`, `natural=wood`, relevant relations
+- hospitals: `amenity=hospital`, `healthcare=hospital`
+- optional accessibility/rest data: benches, toilets, pharmacies, crossings,
+  wheelchair tags, surface/smoothness tags
+
+That would make POI scoring local and remove the next major Overpass dependency.

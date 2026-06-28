@@ -1232,7 +1232,10 @@ Air-quality layers are rendered as city-view heat surfaces:
   covers the city instead of showing isolated bubbles around each station;
 - when no saved station rows exist, the frontend requests a capped city grid of
   real air-quality samples instead of only sampling a tight cross around the map
-  center.
+  center;
+- that fallback grid always includes the selected city/start center first, then
+  surrounding sample points, so the city being inspected is not skipped by an
+  even-sized grid.
 
 Selected routes now also get a route-specific exposure summary:
 

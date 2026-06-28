@@ -193,6 +193,50 @@ test.describe('PathPlanner full GUI regression', () => {
     }
   });
 
+  test('air-quality fallback samples include the selected city center', async ({ page }) => {
+    const airRequests = [];
+    await page.route('**/api/stazioni_dati/**', async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify([]),
+      });
+    });
+    await page.route('**/api/air_quality/**', async (route) => {
+      const url = new URL(route.request().url());
+      const lat = Number(url.searchParams.get('lat'));
+      const lon = Number(url.searchParams.get('lon'));
+      airRequests.push({ lat, lon });
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          isDefault: false,
+          provider: 'Open-Meteo',
+          station: 'Open-Meteo air grid',
+          timestamp: '2026-06-28T08:00:00Z',
+          coordinates: { latitude: lat, longitude: lon },
+          measurements: [
+            { parameter: 'pm25', value: 9.8 },
+            { parameter: 'pm10', value: 18.5 },
+            { parameter: 'no2', value: 24.2 },
+            { parameter: 'o3', value: 68.0 },
+          ],
+        }),
+      });
+    });
+
+    await clearMapState(page);
+    await gotoMap(page);
+    await page.click('#pm25');
+    await page.waitForFunction(() => document.getElementById('pm25')?.getAttribute('aria-pressed') === 'true');
+    await page.waitForFunction(() => document.getElementById('layerStatus')?.textContent.includes('real samples'));
+
+    expect(airRequests.length).toBeGreaterThanOrEqual(17);
+    expect(airRequests.some((point) => (
+      Math.abs(point.lat - 44.645819) < 0.00001 &&
+      Math.abs(point.lon - 10.925719) < 0.00001
+    ))).toBe(true);
+  });
+
   test('real backend route renders deduplicated alternatives, source text, directions, and correct request params', async ({ page }) => {
     const problems = collectPageProblems(page);
     await mockRouteExposureData(page);

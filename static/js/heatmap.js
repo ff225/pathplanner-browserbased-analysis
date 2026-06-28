@@ -313,6 +313,29 @@ document.addEventListener("DOMContentLoaded", function() {
         return points;
     }
 
+    function samplePointKey(point) {
+        return Number(point.lat).toFixed(5) + ',' + Number(point.lon).toFixed(5);
+    }
+
+    function buildAirSamplePoints() {
+        var bounds = citySizedAirBounds();
+        var center = resolveAirLayerCenter();
+        var points = [{ lat: center.lat, lon: center.lon }];
+        var seen = {};
+        seen[samplePointKey(points[0])] = true;
+
+        buildGridPoints(bounds, AIR_SAMPLE_GRID_SIZE).forEach(function(point) {
+            var key = samplePointKey(point);
+            if (seen[key]) {
+                return;
+            }
+            seen[key] = true;
+            points.push(point);
+        });
+
+        return points;
+    }
+
     function buildInterpolatedHeatData(sourcePoints) {
         if (!sourcePoints.length) {
             return [];
@@ -987,9 +1010,9 @@ document.addEventListener("DOMContentLoaded", function() {
     }
 
     function fetchSampledAirQualityLayers() {
-        var samplePoints = buildGridPoints(citySizedAirBounds(), AIR_SAMPLE_GRID_SIZE);
+        var samplePoints = buildAirSamplePoints();
 
-        renderLayerUI('No saved station readings found. Loading real air-quality samples across the visible city area...');
+        renderLayerUI('No saved station readings found. Loading real air-quality samples for the selected city center and visible area...');
 
         return Promise.all(samplePoints.map(function(point, index) {
             var url = '/api/air_quality/?lat=' + encodeURIComponent(point.lat) +

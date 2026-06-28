@@ -213,6 +213,64 @@ def test_graphhopper_deduplicates_near_identical_alternatives(monkeypatch):
     assert payload['count'] == 1
 
 
+def test_local_self_intersection_detector_flags_bow_tie_path():
+    path = [
+        {'lat': 44.0000, 'lon': 10.0000},
+        {'lat': 44.0010, 'lon': 10.0010},
+        {'lat': 44.0000, 'lon': 10.0010},
+        {'lat': 44.0010, 'lon': 10.0000},
+    ]
+
+    assert ba._path_has_local_self_intersection(path) is True
+
+
+def test_graphhopper_skips_local_self_intersecting_alternative(monkeypatch):
+    monkeypatch.setattr(ba, 'GRAPHHOPPER_URL', 'http://graphhopper.test')
+    monkeypatch.setattr(ba, '_graphhopper_route_payload', lambda *args, **kwargs: {
+        'paths': [
+            {
+                'distance': 360.0,
+                'time': 240000,
+                'points': {'coordinates': [
+                    [10.0, 44.0],
+                    [10.0010, 44.0010],
+                    [10.0010, 44.0],
+                    [10.0, 44.0010],
+                    [10.0020, 44.0020],
+                ]},
+            },
+            {
+                'distance': 300.0,
+                'time': 200000,
+                'points': {'coordinates': [
+                    [10.0, 44.0],
+                    [10.0006, 44.0007],
+                    [10.0012, 44.0014],
+                    [10.0020, 44.0020],
+                ]},
+            },
+        ],
+    })
+    monkeypatch.setattr(ba, 'fetch_named_pois', lambda *args, **kwargs: {'pois': [], 'source': 'mock'})
+    monkeypatch.setattr(ba, '_fetch_backend_environment_data', lambda lat, lon: _neutral_env())
+    monkeypatch.setattr(ba, '_fetch_walkability_features', lambda bbox: ([], None))
+
+    payload = ba.generate_backend_astar_routes(
+        44.0,
+        10.0,
+        44.002,
+        10.002,
+        condition='respiratory',
+        transport_mode='walking',
+        alternatives=2,
+    )
+
+    assert payload['count'] == 1
+    route = payload['routes'][0]
+    assert route['path_node_count'] == 4
+    assert ba._path_has_local_self_intersection(route['path']) is False
+
+
 def test_walkability_features_penalize_candidate_routes(monkeypatch):
     monkeypatch.setattr(ba, 'GRAPHHOPPER_URL', 'http://graphhopper.test')
     monkeypatch.setattr(ba, '_graphhopper_route_payload', lambda *args, **kwargs: {

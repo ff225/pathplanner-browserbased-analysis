@@ -1258,6 +1258,10 @@ This means the map layer answers “what is the city exposure surface here?” w
 the selected-route card answers “what exposure and nearby clinical/green context
 does this exact path have?”.
 
+Route candidates with small local self-intersections are filtered in the backend
+before they reach the UI. This avoids showing “X”-shaped bow-tie alternatives
+without drawing fake shortcut geometry across non-road space.
+
 This avoids hiding useful demo controls while making the product meaning clearer:
 route styles describe a user's preferred route character, while clinical profiles
 describe health-aware constraints.

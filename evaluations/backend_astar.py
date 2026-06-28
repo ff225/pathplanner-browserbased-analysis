@@ -931,6 +931,63 @@ def _remove_local_path_loops(
     return cleaned
 
 
+def _project_path_point(point: Dict[str, float], origin_lat: float) -> Tuple[float, float]:
+    return (
+        point['lon'] * 111000.0 * math.cos(origin_lat * math.pi / 180.0),
+        point['lat'] * 111000.0,
+    )
+
+
+def _orientation(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _segments_cross(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    c: Tuple[float, float],
+    d: Tuple[float, float],
+    eps: float = 0.05,
+) -> bool:
+    if (
+        max(a[0], b[0]) + eps < min(c[0], d[0]) or
+        max(c[0], d[0]) + eps < min(a[0], b[0]) or
+        max(a[1], b[1]) + eps < min(c[1], d[1]) or
+        max(c[1], d[1]) + eps < min(a[1], b[1])
+    ):
+        return False
+
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    return (o1 * o2 < -eps) and (o3 * o4 < -eps)
+
+
+def _path_has_local_self_intersection(
+    path: Sequence[Dict[str, float]],
+    lookahead: int = 24,
+    max_segment_m: float = 260.0,
+) -> bool:
+    if len(path) < 4:
+        return False
+
+    origin_lat = sum(point['lat'] for point in path) / len(path)
+    projected = [_project_path_point(point, origin_lat) for point in path]
+    segment_lengths = [haversine_m(path[index], path[index + 1]) for index in range(len(path) - 1)]
+
+    for i in range(len(projected) - 1):
+        if segment_lengths[i] > max_segment_m:
+            continue
+        max_j = min(len(projected) - 2, i + lookahead)
+        for j in range(i + 2, max_j + 1):
+            if segment_lengths[j] > max_segment_m:
+                continue
+            if _segments_cross(projected[i], projected[i + 1], projected[j], projected[j + 1]):
+                return True
+    return False
+
+
 def _simplify_waypoints(
     path: Sequence[Dict[str, float]],
     max_points: int = 6,
@@ -1306,6 +1363,8 @@ def _generate_graphhopper_routes(
         path = _remove_local_path_loops(path)
         path[0] = {'lat': start['lat'], 'lon': start['lon']}
         path[-1] = {'lat': goal['lat'], 'lon': goal['lon']}
+        if _path_has_local_self_intersection(path):
+            continue
         distance = calculate_path_length(path) or (_safe_float(raw.get('distance')) or 0)
         instructions = _graphhopper_instructions(raw, path)
         signature = _path_signature(path, precision=5)
@@ -1478,6 +1537,10 @@ def generate_backend_astar_routes(
             )
             if not result:
                 break
+            result['path'] = _remove_local_path_loops(result['path'])
+            if _path_has_local_self_intersection(result['path']):
+                _add_route_penalties(node_penalties, result['path'], graph, amount=300.0 * (attempt + 1))
+                continue
             signature = _path_signature(result['path'])
             distance = calculate_path_length(result['path'])
             if signature not in signatures and not _is_similar_route(result['path'], distance, routes):

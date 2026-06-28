@@ -280,12 +280,23 @@ test.describe('PathPlanner full GUI regression', () => {
     expect(requestUrl.searchParams.get('distance_tolerance')).toBe('5');
 
     if (metrics.routeCardCount > 1) {
+      const cameraBeforeSwitch = await page.evaluate(() => {
+        const center = window.map.getCenter();
+        return { lat: center.lat, lng: center.lng, zoom: window.map.getZoom() };
+      });
       await page.locator('.directions-route-card, .route-item').nth(1).click();
       await page.waitForTimeout(400);
+      const cameraAfterSwitch = await page.evaluate(() => {
+        const center = window.map.getCenter();
+        return { lat: center.lat, lng: center.lng, zoom: window.map.getZoom() };
+      });
       const afterSwitch = await collectLayoutMetrics(page);
       expect(afterSwitch.routeCardCount).toBe(metrics.routeCardCount);
       expect(afterSwitch.uniqueRouteTextCount).toBe(afterSwitch.routeCardCount);
       expect(afterSwitch.routesClippedBySelector).toBe(false);
+      expect(cameraAfterSwitch.zoom).toBe(cameraBeforeSwitch.zoom);
+      expect(cameraAfterSwitch.lat).toBeCloseTo(cameraBeforeSwitch.lat, 6);
+      expect(cameraAfterSwitch.lng).toBeCloseTo(cameraBeforeSwitch.lng, 6);
     }
 
     const previewButton = page.locator('.directions-route-preview:not(.directions-route-preview--stop)').first();

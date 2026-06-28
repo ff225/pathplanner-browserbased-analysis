@@ -2462,7 +2462,7 @@ function displayFallbackRoute(map, currentRouting, waypointInputs, additionalInf
         var fallbackControl = L.Routing.control({
             waypoints: [startLatLng, endLatLng],
             routeWhileDragging: false,
-            fitSelectedRoutes: true,
+            fitSelectedRoutes: false,
             show: false,
             showAlternatives: false, // Keep it simple for fallback
             lineOptions: {
@@ -4220,6 +4220,7 @@ async function route(
                 routePromises.push(new Promise(async (resolveRoutePromise) => {
 	                    const directRouteControl = L.Routing.control({
 	                        waypoints,
+                            fitSelectedRoutes: false,
                             show: false,
 	                        router: createMapboxRouter('walking'),
 	                        createMarker: function() { return null; },
@@ -4267,6 +4268,7 @@ async function route(
 
                         const altRouteControl = L.Routing.control({
                             waypoints: altRouteWaypointsForControl,
+                            fitSelectedRoutes: false,
                             show: false,
                             router: createMapboxRouter('walking'),
 	                            createMarker: function() { return null; },
@@ -4305,6 +4307,7 @@ async function route(
                 routePromises.push(new Promise((resolveRoutePromise) => {
                     const directRouteControl = L.Routing.control({
                         waypoints,
+                        fitSelectedRoutes: false,
                         show: false,
                         router: createMapboxRouter(additionalInfos.transportMode || 'walking'),
 	                        createMarker: function() { return null; },
@@ -4762,7 +4765,7 @@ async function routeWithPrecalculatedRoutes(
                 : L.Routing.control({
 	                waypoints: waypoints,
 	                routeWhileDragging: false,
-	                fitSelectedRoutes: true,
+	                fitSelectedRoutes: false,
                     show: false,
 	                showAlternatives: false,
 	                lineOptions: {

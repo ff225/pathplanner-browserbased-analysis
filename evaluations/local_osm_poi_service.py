@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .routing_regions import local_osm_db_for_bbox
+
 
 LOCAL_POI_SOURCE = 'OpenStreetMap local PBF SQLite'
 
@@ -283,7 +285,9 @@ def fetch_local_named_pois(
     *,
     db_path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    path = Path(db_path) if db_path else local_osm_db_path()
+    path = Path(db_path) if db_path else local_osm_db_for_bbox(min_lat, min_lon, max_lat, max_lon)
+    if not path:
+        path = local_osm_db_path()
     if not path or not path.exists():
         return None
     if max_lat < min_lat:
@@ -316,7 +320,9 @@ def fetch_local_walkability_features(
     category: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    path = Path(db_path) if db_path else local_osm_db_path()
+    path = Path(db_path) if db_path else local_osm_db_for_bbox(min_lat, min_lon, max_lat, max_lon)
+    if not path:
+        path = local_osm_db_path()
     if not path or not path.exists():
         return None
     if max_lat < min_lat:

@@ -70,18 +70,18 @@ runtime data explicitly.
 
 The backend first asks a local GraphHopper service for route candidates.
 GraphHopper is now started by `docker-compose.osm-data.yml` together with the
-Django app, and points at a local imported OSM extract:
+Django app. The current Compose runtime starts one service per loaded region:
 
-```text
-pbf/italy-260626.osm.pbf
-runtime/graphhopper/graphs/italy-gh9
-runtime/graphhopper/config/pathplanner-demo.yml
-```
+| Region | Internal URL | PBF | Graph cache |
+| --- | --- | --- | --- |
+| Italy | `http://graphhopper-italy:8989` | `pbf/italy-260626.osm.pbf` | `runtime/graphhopper/graphs/italy-gh9` |
+| London | `http://graphhopper-london:8989` | `pbf/greater-london-260626.osm.pbf` | `runtime/graphhopper/graphs/london-gh9` |
+| New York | `http://graphhopper-new-york:8989` | `pbf/new-york-260626.osm.pbf` | `runtime/graphhopper/graphs/new-york-gh9` |
 
-The Django backend calls GraphHopper through:
+The Django backend chooses the service through:
 
 ```env
-GRAPHHOPPER_URL=http://graphhopper:8989
+PATHPLANNER_ROUTING_REGIONS=italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 GRAPHHOPPER_TIMEOUT_SECONDS=8
 GRAPHHOPPER_FORCE=false
 ```
@@ -548,8 +548,7 @@ docker-compose.local.yml
 The local app service with the OSM-data override now defaults to:
 
 ```env
-GRAPHHOPPER_URL=http://graphhopper:8989
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
+PATHPLANNER_ROUTING_REGIONS=italy|...|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|...|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|...|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 ```
 
 And mounts local POI DBs:
@@ -583,11 +582,7 @@ Nginx, GraphHopper, and SQLite data from one Compose command. It mounts:
 It also wires these environment variables:
 
 ```env
-GRAPHHOPPER_URL=http://graphhopper:8989
-GRAPHHOPPER_PBF_PATH=/work/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/italy-gh9
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
-LOCAL_OSM_PBF_PATH=/app/pbf/italy-260626.osm.pbf
+PATHPLANNER_ROUTING_REGIONS=italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 LOCAL_OSM_POI_BUILD_MODE=full
 PATHPLANNER_ENSURE_LOCAL_OSM_DB=false
 ```
@@ -802,8 +797,10 @@ For the local demo, the expected running services are:
 
 ```text
 Django app:     http://127.0.0.1:8765
-GraphHopper:    http://127.0.0.1:8989
-POI SQLite DB:  runtime/local_osm_pois/italy.sqlite3
+GraphHopper IT: http://127.0.0.1:8989
+GraphHopper UK: http://127.0.0.1:8991
+GraphHopper NY: http://127.0.0.1:8993
+POI SQLite DBs: runtime/local_osm_pois/{italy,london,new-york}.sqlite3
 ```
 
 Local convention after frontend/backend edits:
@@ -819,13 +816,15 @@ http://127.0.0.1:8765
 ```
 
 Old app instances on other `8xxx` ports should be stopped before QA.
-GraphHopper on `8989/8990` is not an old app instance; it is the local route
-provider used by the Docker app.
+GraphHopper on `8989`, `8991`, and `8993` is not an old app instance; those are
+the Italy, London, and New York route providers used by the Docker app.
 
 Smoke checks:
 
 ```bash
 curl http://127.0.0.1:8989/info
+curl http://127.0.0.1:8991/info
+curl http://127.0.0.1:8993/info
 ```
 
 ```bash
@@ -841,8 +840,7 @@ OpenStreetMap local PBF SQLite: italy.sqlite3
 Backend route benchmark utility:
 
 ```bash
-LOCAL_OSM_POI_DB=runtime/local_osm_pois/italy.sqlite3 \
-GRAPHHOPPER_URL=http://127.0.0.1:8989 \
+PATHPLANNER_ROUTING_REGIONS='italy|32.90,-5.52,47.26,21.72|http://127.0.0.1:8989|runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://127.0.0.1:8991|runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://127.0.0.1:8993|runtime/local_osm_pois/new-york.sqlite3' \
 .venv/bin/python scripts/benchmark_backend_routes.py \
   --case modena-portali \
   --mode walking \
@@ -880,15 +878,13 @@ The smoke test also runs the runtime config readiness check unless
 ```
 
 The script currently includes Modena, Bologna, Florence, Rome, London, and New
-York cases. It queries the active GraphHopper `/info` bbox and skips cases
-outside the loaded graph. With the current Italy graph, the expected result is:
+York cases. The current Compose runtime has all three loaded regions available,
+so Italy, London, and New York smoke cases can all use local GraphHopper plus
+local SQLite data.
 
 ```text
-4 passed, 0 failed, 2 skipped
+Italy, London, and New York route smoke checks should pass with local data.
 ```
-
-London and New York should pass after starting GraphHopper with their respective
-PBF/graph and building the matching local SQLite DB.
 
 The benchmark script currently includes these cases:
 
@@ -898,8 +894,8 @@ The benchmark script currently includes these cases:
 | `london-short` | London | useful after loading a UK/London PBF graph |
 | `new-york-short` | New York | useful after loading a New York/US PBF graph |
 
-Only areas present in the active GraphHopper graph and local SQLite DB can be
-tested fully with local route/POI data.
+Only areas present in a configured region's GraphHopper graph and local SQLite
+DB can be tested fully with local route/POI data.
 
 ## Where Data Calls Happen
 
@@ -930,13 +926,13 @@ Preferred path:
 | Data | File/function | Provider |
 | --- | --- | --- |
 | Route candidates | `evaluations/backend_astar.py::_graphhopper_route_payload()` | local GraphHopper `/route` |
-| GraphHopper URL | `GRAPHHOPPER_URL` | `http://graphhopper:8989` inside Compose |
+| GraphHopper region registry | `PATHPLANNER_ROUTING_REGIONS` | maps bbox -> GraphHopper URL + SQLite DB |
 | OSM graph data | GraphHopper graph under `runtime/graphhopper/graphs/...` | generated from local PBF |
 
 The actual HTTP call is:
 
 ```python
-requests.get(f'{GRAPHHOPPER_URL}/route', params=params, timeout=GRAPHHOPPER_TIMEOUT_SECONDS)
+requests.get(f'{selected_region.graphhopper_url}/route', params=params, timeout=GRAPHHOPPER_TIMEOUT_SECONDS)
 ```
 
 Fallback path:

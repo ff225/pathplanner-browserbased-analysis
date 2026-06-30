@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from .air_quality_service import air_quality_service
-from .local_osm_poi_service import fetch_local_named_pois, has_local_osm_db
+from .local_osm_poi_service import fetch_local_named_pois
 
 OPENMETEO_FORECAST = (
     'https://api.open-meteo.com/v1/forecast'
@@ -506,10 +506,9 @@ def fetch_named_pois(
     if (max_lat - min_lat) > _MAX_POI_BBOX_SPAN or (max_lon - min_lon) > _MAX_POI_BBOX_SPAN:
         raise ValueError('bounding box too large')
 
-    if has_local_osm_db():
-        local_result = fetch_local_named_pois(category, min_lat, min_lon, max_lat, max_lon, limit=limit)
-        if local_result is not None:
-            return local_result
+    local_result = fetch_local_named_pois(category, min_lat, min_lon, max_lat, max_lon, limit=limit)
+    if local_result is not None:
+        return local_result
 
     cache_key = f'pois:{category}:{round(min_lat,4)},{round(min_lon,4)},{round(max_lat,4)},{round(max_lon,4)}'
     cached = _cache_get(cache_key)

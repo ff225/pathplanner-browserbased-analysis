@@ -71,25 +71,29 @@ unzip pathplanner-local-osm-pois.zip -d /opt/pathplanner/app
 unzip pathplanner-graphhopper.zip -d /opt/pathplanner/app
 ```
 
-Per la demo Italia, questi valori possono restare uguali ai default di
+Per la demo multi-regione, questi valori possono restare uguali ai default di
 `.env.example`:
 
 ```dotenv
-GRAPHHOPPER_URL=http://graphhopper:8989
-GRAPHHOPPER_PBF_PATH=/work/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/italy-gh9
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
-LOCAL_OSM_PBF_PATH=/app/pbf/italy-260626.osm.pbf
+PATHPLANNER_ROUTING_REGIONS=italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 PATHPLANNER_ENSURE_LOCAL_OSM_DB=false
 ```
 
-Compila `.env`, poi valida e avvia app, Nginx e GraphHopper insieme:
+Compose avvia tre servizi GraphHopper:
+
+| Regione | Servizio Compose | Check host |
+| --- | --- | --- |
+| Italia | `graphhopper-italy` | `http://127.0.0.1:8989/info` |
+| Londra | `graphhopper-london` | `http://127.0.0.1:8991/info` |
+| New York | `graphhopper-new-york` | `http://127.0.0.1:8993/info` |
+
+Compila `.env`, poi valida e avvia app, Nginx e i tre GraphHopper insieme:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.osm-data.yml config
 docker compose -f docker-compose.yml -f docker-compose.osm-data.yml up -d --build
 docker compose -f docker-compose.yml -f docker-compose.osm-data.yml ps
-docker compose -f docker-compose.yml -f docker-compose.osm-data.yml logs -f app graphhopper
+docker compose -f docker-compose.yml -f docker-compose.osm-data.yml logs -f app graphhopper-italy graphhopper-london graphhopper-new-york
 ```
 
 L'entrypoint esegue automaticamente:
@@ -296,8 +300,11 @@ Per non-Docker, salva almeno `/opt/pathplanner/data/db.sqlite3` e `/opt/pathplan
 curl -I http://pathplanner.example.com/map/
 curl -I http://pathplanner.example.com/static/
 curl http://127.0.0.1:8989/info
+curl http://127.0.0.1:8991/info
+curl http://127.0.0.1:8993/info
 docker compose -f docker-compose.yml -f docker-compose.osm-data.yml exec app python manage.py check --deploy
-docker compose -f docker-compose.yml -f docker-compose.osm-data.yml logs --tail=100 app graphhopper
+docker compose -f docker-compose.yml -f docker-compose.osm-data.yml exec app python scripts/check_runtime_config.py
+docker compose -f docker-compose.yml -f docker-compose.osm-data.yml logs --tail=100 app graphhopper-italy graphhopper-london graphhopper-new-york
 ```
 
 Nel browser verifica:

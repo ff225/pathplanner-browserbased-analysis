@@ -90,3 +90,36 @@ def test_runtime_config_reports_missing_required_keys(tmp_path, monkeypatch):
     assert 'DJANGO_SECRET_KEY is required' in result['errors']
     assert 'GRAPHHOPPER_URL is required for local real-data routing' in result['errors']
     assert 'LOCAL_OSM_POI_DB is required for local real-data routing' in result['errors']
+
+
+def test_runtime_config_accepts_regional_routing_specs(tmp_path, monkeypatch):
+    italy_db = tmp_path / 'italy.sqlite3'
+    london_db = tmp_path / 'london.sqlite3'
+    _write_valid_db(italy_db)
+    _write_valid_db(london_db)
+    env_path = tmp_path / '.env'
+    env_path.write_text(
+        '\n'.join(
+            [
+                'DJANGO_SECRET_KEY=secret',
+                'DJANGO_ALLOWED_HOSTS=localhost',
+                (
+                    'PATHPLANNER_ROUTING_REGIONS='
+                    f'italy|43.0,9.0,45.0,11.0|http://gh-italy:8989|{italy_db};'
+                    f'london|51.0,-0.5,52.0,0.2|http://gh-london:8989|{london_db}'
+                ),
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        check_runtime_config,
+        '_check_graphhopper',
+        lambda url, timeout: {'ok': True, 'url': url, 'profiles': ['foot', 'bike', 'car']},
+    )
+
+    result = check_runtime_config.check_runtime_config(env_files=[env_path])
+
+    assert result['ok'] is True
+    assert len(result['graphhopper']) == 2
+    assert len(result['regional_local_dbs']) == 2

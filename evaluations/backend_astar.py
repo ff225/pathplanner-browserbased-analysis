@@ -34,6 +34,7 @@ from .environmental_data_service import (
     fetch_street_graph,
 )
 from .local_osm_poi_service import fetch_local_walkability_features
+from .routing_regions import select_region_for_points
 
 
 BACKEND_ASTAR_MAX_EXPANSIONS = int(os.getenv('BACKEND_ASTAR_MAX_EXPANSIONS', '20000'))
@@ -1032,7 +1033,9 @@ def _graphhopper_route_payload(
     alternatives: int,
     distance_tolerance: float,
 ) -> Optional[Dict[str, Any]]:
-    if not GRAPHHOPPER_URL:
+    region = select_region_for_points(start, goal)
+    graphhopper_url = (region.graphhopper_url if region and region.graphhopper_url else GRAPHHOPPER_URL).rstrip('/')
+    if not graphhopper_url:
         return None
 
     params = [
@@ -1057,16 +1060,20 @@ def _graphhopper_route_payload(
 
     try:
         response = requests.get(
-            f'{GRAPHHOPPER_URL}/route',
+            f'{graphhopper_url}/route',
             params=params,
             timeout=GRAPHHOPPER_TIMEOUT_SECONDS,
         )
         if not response.ok:
             print(f'[graphhopper] HTTP {response.status_code}: {response.text[:160]}')
             return None
-        return response.json()
+        payload = response.json()
+        if region is not None:
+            payload['_pathplanner_region'] = region.region_id
+            payload['_pathplanner_graphhopper_url'] = graphhopper_url
+        return payload
     except Exception as exc:
-        print(f'[graphhopper] unavailable: {exc}')
+        print(f'[graphhopper] {graphhopper_url} unavailable: {exc}')
         return None
 
 
@@ -1350,6 +1357,8 @@ def _generate_graphhopper_routes(
     if walkability_features and walkability_source:
         data_sources['walkability'] = walkability_source
     data_sources['street_graph'] = 'GraphHopper local OSM graph'
+    if payload.get('_pathplanner_region'):
+        data_sources['routing_region'] = payload['_pathplanner_region']
 
     green_scale = tolerance_green_scale(distance_tolerance)
     routes = []
@@ -1433,6 +1442,7 @@ def _generate_graphhopper_routes(
         'street_graph': {
             'source': 'GraphHopper local OSM graph',
             'count': {'routes': len(graphhopper_paths)},
+            'region': payload.get('_pathplanner_region'),
         },
         'parallelism': {
             'io_workers': BACKEND_ASTAR_IO_WORKERS,
@@ -1482,7 +1492,7 @@ def generate_backend_astar_routes(
     )
     if graphhopper_payload is not None:
         return graphhopper_payload
-    if GRAPHHOPPER_URL and GRAPHHOPPER_FORCE:
+    if (GRAPHHOPPER_URL or select_region_for_points(start, goal)) and GRAPHHOPPER_FORCE:
         raise RuntimeError('GraphHopper is configured but did not return usable routes')
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)

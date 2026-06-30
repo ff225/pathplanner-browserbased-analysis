@@ -124,6 +124,48 @@ def test_backend_astar_uses_graphhopper_when_configured(monkeypatch):
     assert payload['routes'][0]['explanation']['environment']['sample_count'] >= 1
 
 
+def test_graphhopper_uses_matching_regional_service(monkeypatch):
+    monkeypatch.setattr(ba, 'GRAPHHOPPER_URL', '')
+    monkeypatch.setenv(
+        'PATHPLANNER_ROUTING_REGIONS',
+        'italy|43.0,9.0,45.0,11.0|http://gh-italy:8989|/tmp/italy.sqlite3;'
+        'london|51.0,-0.5,52.0,0.2|http://gh-london:8989|/tmp/london.sqlite3',
+    )
+    seen = {}
+
+    def fake_get(url, **kwargs):
+        seen['url'] = url
+
+        class Response:
+            ok = True
+
+            def json(self):
+                return {
+                    'paths': [
+                        {
+                            'distance': 180.0,
+                            'time': 120000,
+                            'points': {'coordinates': [[-0.1, 51.5], [-0.11, 51.51]]},
+                        },
+                    ],
+                }
+
+        return Response()
+
+    monkeypatch.setattr(ba.requests, 'get', fake_get)
+
+    payload = ba._graphhopper_route_payload(
+        {'lat': 51.5, 'lon': -0.1},
+        {'lat': 51.51, 'lon': -0.11},
+        'walking',
+        1,
+        1,
+    )
+
+    assert seen['url'] == 'http://gh-london:8989/route'
+    assert payload['_pathplanner_region'] == 'london'
+
+
 def test_environment_sampling_is_adaptive_for_route_length():
     short = ba._sample_environment_points(
         {'lat': 44.0, 'lon': 10.0},

@@ -220,7 +220,11 @@ def _selected_cases(regions: set[str], keys: set[str]) -> list[RouteCase]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-url', default=os.getenv('PP_BASE_URL', 'http://127.0.0.1:8765'))
-    parser.add_argument('--graphhopper-url', default=os.getenv('GRAPHHOPPER_URL', 'http://127.0.0.1:8989'))
+    parser.add_argument(
+        '--graphhopper-url',
+        default=os.getenv('GRAPHHOPPER_URL', ''),
+        help='Optional single GraphHopper URL used only to skip cases outside its bbox.',
+    )
     parser.add_argument('--direct', action='store_true', help='Call backend Python directly instead of HTTP API')
     parser.add_argument('--region', action='append', choices=sorted({case.region for case in CASES}))
     parser.add_argument('--case', action='append', dest='case_keys', choices=sorted(case.key for case in CASES))
@@ -254,10 +258,12 @@ def main() -> int:
         )
         config_failed = not config_result['ok']
 
-    graphhopper_bbox = None if args.no_skip_outside_graphhopper_bbox else _fetch_graphhopper_bbox(
-        args.graphhopper_url,
-        min(args.timeout, 10.0),
-    )
+    graphhopper_bbox = None
+    if args.graphhopper_url and not args.no_skip_outside_graphhopper_bbox:
+        graphhopper_bbox = _fetch_graphhopper_bbox(
+            args.graphhopper_url,
+            min(args.timeout, 10.0),
+        )
     results = []
     failures = 0
 
@@ -295,6 +301,7 @@ def main() -> int:
             'status': 'failed' if errors else 'passed',
             'elapsed_ms': elapsed_ms,
             'source': payload.get('source'),
+            'routing_region': (first.get('data_sources') or {}).get('routing_region'),
             'route_count': payload.get('count') or len(routes),
             'distance_m': first.get('distance_m'),
             'duration_s': first.get('duration_s'),

@@ -57,6 +57,30 @@ def test_fetch_named_pois_uses_local_db_without_overpass(monkeypatch, tmp_path):
     assert result['source'].startswith('OpenStreetMap local PBF SQLite')
 
 
+def test_fetch_named_pois_selects_regional_local_db(monkeypatch, tmp_path):
+    italy_db = tmp_path / 'italy.sqlite3'
+    london_db = tmp_path / 'london.sqlite3'
+    init_db(italy_db)
+    init_db(london_db)
+    with sqlite3.connect(italy_db) as conn:
+        _insert_poi(conn, row_id='1', category='parks', name='Parco Italia', kind='park', lat=44.0, lon=10.0)
+    with sqlite3.connect(london_db) as conn:
+        _insert_poi(conn, row_id='2', category='parks', name='London Park', kind='park', lat=51.5, lon=-0.1)
+
+    monkeypatch.delenv('LOCAL_OSM_POI_DB', raising=False)
+    monkeypatch.setenv(
+        'PATHPLANNER_ROUTING_REGIONS',
+        f'italy|43.0,9.0,45.0,11.0|http://gh-italy:8989|{italy_db};'
+        f'london|51.0,-0.5,52.0,0.2|http://gh-london:8989|{london_db}',
+    )
+
+    result = eds.fetch_named_pois('parks', 51.49, -0.12, 51.51, -0.08)
+
+    assert result['count'] == 1
+    assert result['pois'][0]['name'] == 'London Park'
+    assert result['source'].endswith('london.sqlite3')
+
+
 def test_fetch_local_walkability_features_returns_real_osm_tags(tmp_path):
     db_path = tmp_path / 'pois.sqlite3'
     init_db(db_path)

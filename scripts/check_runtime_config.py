@@ -52,6 +52,7 @@ ROUTING_OPTIONAL_DEFAULTS = {
     'LOCAL_OSM_POI_BUILD_MODE': 'full',
     'LOCAL_OSM_POI_MIN_ROWS': '1',
     'LOCAL_OSM_WALKABILITY_MIN_ROWS': '1',
+    'PATHPLANNER_ROUTING_REGIONS': 'unset',
 }
 
 FRONTEND_RECOMMENDED = (
@@ -103,6 +104,31 @@ def _resolve_path(raw_path: str | None) -> Path | None:
         return None
     path = Path(raw_path).expanduser()
     return path if path.is_absolute() else ROOT / path
+
+
+def _parse_region_specs(raw: str | None) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    if not raw:
+        return specs
+    for item in raw.split(';'):
+        parts = [part.strip() for part in item.split('|')]
+        if len(parts) < 4:
+            continue
+        region_id, bbox_raw, graphhopper_url, local_db = parts[:4]
+        bbox_parts = [part.strip() for part in bbox_raw.split(',')]
+        if len(bbox_parts) != 4:
+            continue
+        try:
+            bbox = [float(part) for part in bbox_parts]
+        except ValueError:
+            continue
+        specs.append({
+            'id': region_id,
+            'bbox': bbox,
+            'graphhopper_url': graphhopper_url,
+            'local_osm_poi_db': local_db,
+        })
+    return specs
 
 
 def _check_sqlite_db(path: Path, min_poi_rows: int, min_walkability_rows: int) -> dict[str, Any]:
@@ -171,9 +197,11 @@ def check_runtime_config(
     for key in DJANGO_REQUIRED:
         if not _is_set(values, key):
             errors.append(f'{key} is required')
-    for key in ROUTING_REQUIRED:
-        if not _is_set(values, key):
-            errors.append(f'{key} is required for local real-data routing')
+    region_specs = _parse_region_specs(values.get('PATHPLANNER_ROUTING_REGIONS'))
+    if not region_specs:
+        for key in ROUTING_REQUIRED:
+            if not _is_set(values, key):
+                errors.append(f'{key} is required for local real-data routing')
     for key, default in ROUTING_OPTIONAL_DEFAULTS.items():
         if not _is_set(values, key):
             warnings.append(f'{key} not set; app default is {default}')
@@ -203,6 +231,23 @@ def check_runtime_config(
         if not local_db['ok']:
             errors.append(f"LOCAL_OSM_POI_DB invalid: {local_db.get('reason')}")
 
+    regional_local_dbs = []
+    if check_local_db and region_specs:
+        for region in region_specs:
+            region_db_path = _resolve_path(region.get('local_osm_poi_db'))
+            if not region_db_path:
+                result = {'ok': False, 'path': None, 'reason': 'missing_path'}
+            else:
+                result = _check_sqlite_db(
+                    region_db_path,
+                    min_poi_rows=int(values.get('LOCAL_OSM_POI_MIN_ROWS') or '1'),
+                    min_walkability_rows=int(values.get('LOCAL_OSM_WALKABILITY_MIN_ROWS') or '1'),
+                )
+            result['region'] = region.get('id')
+            regional_local_dbs.append(result)
+            if not result['ok']:
+                errors.append(f"{region.get('id')} local DB invalid: {result.get('reason')}")
+
     pbf = None
     pbf_path = _resolve_path(values.get('LOCAL_OSM_PBF_PATH'))
     if require_pbf or _is_set(values, 'LOCAL_OSM_PBF_PATH'):
@@ -214,9 +259,18 @@ def check_runtime_config(
 
     graphhopper = None
     if check_graphhopper:
-        graphhopper = _check_graphhopper(values.get('GRAPHHOPPER_URL') or '', graphhopper_timeout)
-        if not graphhopper['ok']:
-            errors.append(f"GRAPHHOPPER_URL invalid: {graphhopper.get('reason')}")
+        if region_specs:
+            graphhopper = []
+            for region in region_specs:
+                result = _check_graphhopper(region.get('graphhopper_url') or '', graphhopper_timeout)
+                result['region'] = region.get('id')
+                graphhopper.append(result)
+                if not result['ok']:
+                    errors.append(f"{region.get('id')} GraphHopper invalid: {result.get('reason')}")
+        else:
+            graphhopper = _check_graphhopper(values.get('GRAPHHOPPER_URL') or '', graphhopper_timeout)
+            if not graphhopper['ok']:
+                errors.append(f"GRAPHHOPPER_URL invalid: {graphhopper.get('reason')}")
 
     checked_keys = [
         *DJANGO_REQUIRED,
@@ -226,6 +280,7 @@ def check_runtime_config(
         *ENVIRONMENT_OPTIONAL,
         'LOCAL_OSM_PBF_PATH',
         'PATHPLANNER_ENSURE_LOCAL_OSM_DB',
+        'PATHPLANNER_ROUTING_REGIONS',
     ]
     return {
         'ok': not errors,
@@ -233,6 +288,7 @@ def check_runtime_config(
         'warnings': warnings,
         'keys': [_safe_status(values, key) for key in checked_keys],
         'local_db': local_db,
+        'regional_local_dbs': regional_local_dbs,
         'pbf': pbf,
         'graphhopper': graphhopper,
     }
@@ -274,10 +330,16 @@ def main() -> int:
             print(f'ERROR {error}')
         for warning in result['warnings']:
             print(f'WARN {warning}')
-        if result['graphhopper']:
+        if isinstance(result['graphhopper'], list):
+            ok_count = sum(1 for item in result['graphhopper'] if item.get('ok'))
+            print(f"GraphHopper regions: {ok_count}/{len(result['graphhopper'])} ok")
+        elif result['graphhopper']:
             print(f"GraphHopper: {'ok' if result['graphhopper']['ok'] else 'failed'}")
         if result['local_db']:
             print(f"Local DB: {'ok' if result['local_db']['ok'] else 'failed'}")
+        if result['regional_local_dbs']:
+            ok_count = sum(1 for item in result['regional_local_dbs'] if item.get('ok'))
+            print(f"Local DB regions: {ok_count}/{len(result['regional_local_dbs'])} ok")
         if result['pbf']:
             print(f"PBF: {'ok' if result['pbf']['ok'] else 'failed'}")
     return 0 if result['ok'] else 1

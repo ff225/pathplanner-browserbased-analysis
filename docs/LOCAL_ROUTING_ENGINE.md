@@ -16,23 +16,22 @@ Why this exists:
 Configuration:
 
 ```env
-GRAPHHOPPER_URL=http://graphhopper:8989
+PATHPLANNER_ROUTING_REGIONS=italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 GRAPHHOPPER_TIMEOUT_SECONDS=8
 GRAPHHOPPER_FORCE=false
 GRAPHHOPPER_PROFILE_WALKING=foot
 GRAPHHOPPER_PROFILE_CYCLING=bike
 GRAPHHOPPER_PROFILE_CAR=car
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
-GRAPHHOPPER_PBF_PATH=/work/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/italy-gh9
 ```
 
 Behavior:
 
-- If `GRAPHHOPPER_URL` is empty, nothing changes: the backend uses Overpass
-  street-graph A*.
-- If `GRAPHHOPPER_URL` is set and returns route alternatives, those real OSM
-  route candidates are used and scored.
+- If start/end match a configured region, that region's GraphHopper and local
+  SQLite DB are used.
+- If no region matches and `GRAPHHOPPER_URL` is empty, the backend uses
+  Overpass street-graph A*.
+- If no region matches and `GRAPHHOPPER_URL` is set, that single GraphHopper URL
+  is used as fallback.
 - If GraphHopper is set but unavailable, the backend falls back to Overpass A*
   unless `GRAPHHOPPER_FORCE=true`.
 - If `GRAPHHOPPER_FORCE=true` and GraphHopper cannot return usable routes, the
@@ -51,16 +50,19 @@ Local files currently tested under `pbf/`:
 | New York | `new-york-260626.osm.pbf` | ~33 s | 317 MB | ~93 ms |
 | Italy | `italy-260626.osm.pbf` | ~2 min 35 s | 1.2 GB | ~69 ms for Modena |
 
-Start a tested region:
+Start the tested multi-region runtime:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.osm-data.yml up -d --build
 curl http://127.0.0.1:8989/info
+curl http://127.0.0.1:8991/info
+curl http://127.0.0.1:8993/info
 ```
 
-The Compose flow starts both Django and GraphHopper. Django reaches
-GraphHopper through the internal Docker network at `http://graphhopper:8989`,
-while the host can inspect it at `http://127.0.0.1:8989`.
+The Compose flow starts Django plus three GraphHopper services. Django reaches
+them through the internal Docker network as `graphhopper-italy`,
+`graphhopper-london`, and `graphhopper-new-york`; the host can inspect them on
+ports `8989`, `8991`, and `8993`.
 
 For debugging outside Compose, start one tested region manually:
 
@@ -133,10 +135,10 @@ Then point the app at that explicit database:
 LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
 ```
 
-For local Docker, `docker-compose.local.yml` mounts `runtime/local_osm_pois`
-read-only into `/app/runtime/local_osm_pois`, so changing from Italy to London or
-New York means building/selecting the matching DB. There is no hidden persistent
-city cache.
+For local Docker, `docker-compose.osm-data.yml` mounts `runtime/local_osm_pois`
+into `/app/runtime/local_osm_pois`; the backend selects the matching Italy,
+London, or New York DB from `PATHPLANNER_ROUTING_REGIONS`. There is no hidden
+persistent city cache.
 
 Extracted POIs:
 

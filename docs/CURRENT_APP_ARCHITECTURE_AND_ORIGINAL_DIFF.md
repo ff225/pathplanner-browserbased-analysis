@@ -208,19 +208,23 @@ GraphHopper is the preferred road-route provider now.
 Configured by:
 
 ```env
-GRAPHHOPPER_URL=http://graphhopper:8989
+PATHPLANNER_ROUTING_REGIONS=italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3
 GRAPHHOPPER_TIMEOUT_SECONDS=8
 GRAPHHOPPER_FORCE=false
 GRAPHHOPPER_PROFILE_WALKING=foot
 GRAPHHOPPER_PROFILE_CYCLING=bike
 GRAPHHOPPER_PROFILE_CAR=car
-GRAPHHOPPER_PBF_PATH=/work/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/italy-gh9
 ```
 
 In the Docker Compose flow, GraphHopper is started by
-`docker-compose.osm-data.yml` on the same Compose network as Django. It is also
-published on `127.0.0.1:8989` for local checks.
+`docker-compose.osm-data.yml` on the same Compose network as Django. The current
+Compose runtime starts three services:
+
+| Region | Internal URL | Host check URL |
+| --- | --- | --- |
+| Italy | `http://graphhopper-italy:8989` | `http://127.0.0.1:8989/info` |
+| London | `http://graphhopper-london:8989` | `http://127.0.0.1:8991/info` |
+| New York | `http://graphhopper-new-york:8989` | `http://127.0.0.1:8993/info` |
 
 For manual debugging outside Compose, the helper script can still start one
 region:
@@ -244,8 +248,10 @@ candidate geometries. PathPlanner then ranks those geometries.
 
 Current behavior:
 
-- if `GRAPHHOPPER_URL` is set and GraphHopper returns usable routes, the backend
-  uses those candidates;
+- if start/end match a configured `PATHPLANNER_ROUTING_REGIONS` bbox, the
+  backend calls that region's GraphHopper service and matching local SQLite DB;
+- if no region matches but `GRAPHHOPPER_URL` is set, the backend uses that
+  single GraphHopper URL as a fallback;
 - if GraphHopper is unavailable and `GRAPHHOPPER_FORCE=false`, backend falls
   back to Overpass street-graph A*;
 - if GraphHopper is unavailable and `GRAPHHOPPER_FORCE=true`, the backend
@@ -795,10 +801,10 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compo
 ```
 
 GraphHopper is now part of the Compose runtime when
-`docker-compose.osm-data.yml` is included. The app depends on the GraphHopper
-service and defaults to `GRAPHHOPPER_URL=http://graphhopper:8989` inside the
-Docker network. The host can still inspect GraphHopper at
-`http://127.0.0.1:8989/info`.
+`docker-compose.osm-data.yml` is included. The app depends on three GraphHopper
+services and uses `PATHPLANNER_ROUTING_REGIONS` to select Italy, London, or New
+York automatically from route coordinates. The host can inspect the services at
+`127.0.0.1:8989`, `127.0.0.1:8991`, and `127.0.0.1:8993`.
 
 ## 15. Deployment / Migration From Old Server Version
 
@@ -813,46 +819,18 @@ Required after pulling code:
 4. Set `OPENAQ_API_KEY` if available.
 5. Copy runtime zips or equivalent folders.
 6. Extract them into the repo root.
-7. Set `LOCAL_OSM_POI_DB` to the matching SQLite DB.
-8. Set `GRAPHHOPPER_PBF_PATH` and `GRAPHHOPPER_GRAPH_LOCATION` if using a
-   region other than the Italy defaults.
-9. Rebuild/restart Docker Compose with `docker-compose.osm-data.yml`.
-10. Run backend smoke tests.
+7. Keep or edit `PATHPLANNER_ROUTING_REGIONS` if the deployed regions change.
+8. Rebuild/restart Docker Compose with `docker-compose.osm-data.yml`.
+9. Run backend smoke tests.
 
-For Italy:
+The default Compose runtime serves Italy, London, and New York together. The
+runtime artifacts must exist in the extracted folders:
 
-```env
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/italy.sqlite3
-LOCAL_OSM_PBF_PATH=/app/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_URL=http://graphhopper:8989
-GRAPHHOPPER_PBF_PATH=/work/pbf/italy-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/italy-gh9
-PATHPLANNER_ENSURE_LOCAL_OSM_DB=false
-```
-
-For London:
-
-```env
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/london.sqlite3
-LOCAL_OSM_PBF_PATH=/app/pbf/greater-london-260626.osm.pbf
-GRAPHHOPPER_PBF_PATH=/work/pbf/greater-london-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/london-gh9
-```
-
-For New York:
-
-```env
-LOCAL_OSM_POI_DB=/app/runtime/local_osm_pois/new-york.sqlite3
-LOCAL_OSM_PBF_PATH=/app/pbf/new-york-260626.osm.pbf
-GRAPHHOPPER_PBF_PATH=/work/pbf/new-york-260626.osm.pbf
-GRAPHHOPPER_GRAPH_LOCATION=/work/runtime/graphhopper/graphs/new-york-gh9
-```
-
-The current Compose file runs one active GraphHopper region at a time. The
-default is Italy. To switch the whole deployment to London or New York, set the
-matching GraphHopper and local-DB env vars and recreate the containers. If the
-server must serve Italy, London, and New York automatically in one deployment,
-that is a future multi-region routing-service problem.
+| Region | GraphHopper service | PBF | Graph cache | SQLite DB |
+| --- | --- | --- | --- | --- |
+| Italy | `graphhopper-italy` | `pbf/italy-260626.osm.pbf` | `runtime/graphhopper/graphs/italy-gh9` | `runtime/local_osm_pois/italy.sqlite3` |
+| London | `graphhopper-london` | `pbf/greater-london-260626.osm.pbf` | `runtime/graphhopper/graphs/london-gh9` | `runtime/local_osm_pois/london.sqlite3` |
+| New York | `graphhopper-new-york` | `pbf/new-york-260626.osm.pbf` | `runtime/graphhopper/graphs/new-york-gh9` | `runtime/local_osm_pois/new-york.sqlite3` |
 
 ## 16. Backend API Map
 
@@ -993,11 +971,12 @@ The GUI tests are Playwright tests; they are not "manual only".
 
 The current version is much stronger than the original, but these limits remain:
 
-1. GraphHopper region selection is currently operationally manual.
+1. Multi-region routing depends on configured local assets.
 
-   The simple flow starts one region graph at a time. Italy, London, and New
-   York assets exist locally, but serving all transparently would require a
-   router/proxy, multiple GraphHopper services, or dynamic region selection.
+   The Compose runtime now starts Italy, London, and New York GraphHopper
+   services together and selects them by `PATHPLANNER_ROUTING_REGIONS`. Routes
+   outside those configured bboxes still need another region entry, GraphHopper
+   graph, and SQLite POI/walkability DB.
 
 2. Air quality resolution is provider-dependent.
 

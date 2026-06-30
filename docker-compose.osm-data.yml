@@ -1,52 +1,86 @@
+x-graphhopper-service: &graphhopper-service
+  image: eclipse-temurin:17-jre
+  restart: unless-stopped
+  environment:
+    GH_JAVA_HEAP: ${GRAPHHOPPER_JAVA_HEAP:-10g}
+    GH_JAR_PATH: /work/runtime/graphhopper/lib/graphhopper-web-9.1.jar
+    GH_CONFIG_PATH: /work/runtime/graphhopper/config/pathplanner-demo.yml
+  volumes:
+    - ./pbf:/work/pbf:ro
+    - ./runtime/graphhopper:/work/runtime/graphhopper
+  command:
+    - sh
+    - -c
+    - |
+      set -eu
+      if [ ! -f "$$GH_JAR_PATH" ]; then
+        echo "Missing GraphHopper jar: $$GH_JAR_PATH" >&2
+        exit 1
+      fi
+      if [ ! -f "$$GH_PBF_PATH" ]; then
+        echo "Missing GraphHopper PBF: $$GH_PBF_PATH" >&2
+        exit 1
+      fi
+      if [ ! -d "$$GH_GRAPH_LOCATION" ] || [ ! -f "$$GH_GRAPH_LOCATION/properties" ]; then
+        echo "Graph cache not found, importing $$GH_PBF_PATH into $$GH_GRAPH_LOCATION"
+        java -Xmx"$$GH_JAVA_HEAP" \
+          -Ddw.graphhopper.datareader.file="$$GH_PBF_PATH" \
+          -Ddw.graphhopper.graph.location="$$GH_GRAPH_LOCATION" \
+          -jar "$$GH_JAR_PATH" import "$$GH_CONFIG_PATH"
+      fi
+      exec java -Xmx"$$GH_JAVA_HEAP" \
+        -Ddw.graphhopper.datareader.file="$$GH_PBF_PATH" \
+        -Ddw.graphhopper.graph.location="$$GH_GRAPH_LOCATION" \
+        -jar "$$GH_JAR_PATH" server "$$GH_CONFIG_PATH"
+
 services:
-  graphhopper:
-    image: eclipse-temurin:17-jre
-    restart: unless-stopped
+  graphhopper-italy:
+    <<: *graphhopper-service
     environment:
       GH_JAVA_HEAP: ${GRAPHHOPPER_JAVA_HEAP:-10g}
-      GH_PBF_PATH: ${GRAPHHOPPER_PBF_PATH:-/work/pbf/italy-260626.osm.pbf}
-      GH_GRAPH_LOCATION: ${GRAPHHOPPER_GRAPH_LOCATION:-/work/runtime/graphhopper/graphs/italy-gh9}
+      GH_PBF_PATH: /work/pbf/italy-260626.osm.pbf
+      GH_GRAPH_LOCATION: /work/runtime/graphhopper/graphs/italy-gh9
       GH_JAR_PATH: /work/runtime/graphhopper/lib/graphhopper-web-9.1.jar
       GH_CONFIG_PATH: /work/runtime/graphhopper/config/pathplanner-demo.yml
     ports:
-      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_PORT:-8989}:8989"
-      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_ADMIN_PORT:-8990}:8990"
-    volumes:
-      - ./pbf:/work/pbf:ro
-      - ./runtime/graphhopper:/work/runtime/graphhopper
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        if [ ! -f "$$GH_JAR_PATH" ]; then
-          echo "Missing GraphHopper jar: $$GH_JAR_PATH" >&2
-          exit 1
-        fi
-        if [ ! -f "$$GH_PBF_PATH" ]; then
-          echo "Missing GraphHopper PBF: $$GH_PBF_PATH" >&2
-          exit 1
-        fi
-        if [ ! -d "$$GH_GRAPH_LOCATION" ] || [ ! -f "$$GH_GRAPH_LOCATION/properties" ]; then
-          echo "Graph cache not found, importing $$GH_PBF_PATH into $$GH_GRAPH_LOCATION"
-          java -Xmx"$$GH_JAVA_HEAP" \
-            -Ddw.graphhopper.datareader.file="$$GH_PBF_PATH" \
-            -Ddw.graphhopper.graph.location="$$GH_GRAPH_LOCATION" \
-            -jar "$$GH_JAR_PATH" import "$$GH_CONFIG_PATH"
-        fi
-        exec java -Xmx"$$GH_JAVA_HEAP" \
-          -Ddw.graphhopper.datareader.file="$$GH_PBF_PATH" \
-          -Ddw.graphhopper.graph.location="$$GH_GRAPH_LOCATION" \
-          -jar "$$GH_JAR_PATH" server "$$GH_CONFIG_PATH"
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_ITALY_PORT:-8989}:8989"
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_ITALY_ADMIN_PORT:-8990}:8990"
+
+  graphhopper-london:
+    <<: *graphhopper-service
+    environment:
+      GH_JAVA_HEAP: ${GRAPHHOPPER_JAVA_HEAP:-10g}
+      GH_PBF_PATH: /work/pbf/greater-london-260626.osm.pbf
+      GH_GRAPH_LOCATION: /work/runtime/graphhopper/graphs/london-gh9
+      GH_JAR_PATH: /work/runtime/graphhopper/lib/graphhopper-web-9.1.jar
+      GH_CONFIG_PATH: /work/runtime/graphhopper/config/pathplanner-demo.yml
+    ports:
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_LONDON_PORT:-8991}:8989"
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_LONDON_ADMIN_PORT:-8992}:8990"
+
+  graphhopper-new-york:
+    <<: *graphhopper-service
+    environment:
+      GH_JAVA_HEAP: ${GRAPHHOPPER_JAVA_HEAP:-10g}
+      GH_PBF_PATH: /work/pbf/new-york-260626.osm.pbf
+      GH_GRAPH_LOCATION: /work/runtime/graphhopper/graphs/new-york-gh9
+      GH_JAR_PATH: /work/runtime/graphhopper/lib/graphhopper-web-9.1.jar
+      GH_CONFIG_PATH: /work/runtime/graphhopper/config/pathplanner-demo.yml
+    ports:
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_NEW_YORK_PORT:-8993}:8989"
+      - "${GRAPHHOPPER_BIND_ADDRESS:-127.0.0.1}:${GRAPHHOPPER_NEW_YORK_ADMIN_PORT:-8994}:8990"
 
   app:
     depends_on:
-      - graphhopper
+      - graphhopper-italy
+      - graphhopper-london
+      - graphhopper-new-york
     environment:
-      GRAPHHOPPER_URL: ${GRAPHHOPPER_URL:-http://graphhopper:8989}
+      PATHPLANNER_ROUTING_REGIONS: ${PATHPLANNER_ROUTING_REGIONS:-italy|32.90,-5.52,47.26,21.72|http://graphhopper-italy:8989|/app/runtime/local_osm_pois/italy.sqlite3;london|51.20,-0.65,51.75,0.45|http://graphhopper-london:8989|/app/runtime/local_osm_pois/london.sqlite3;new-york|40.40,-74.35,41.05,-73.55|http://graphhopper-new-york:8989|/app/runtime/local_osm_pois/new-york.sqlite3}
+      GRAPHHOPPER_URL: ${GRAPHHOPPER_URL:-}
       PATHPLANNER_ENSURE_LOCAL_OSM_DB: ${PATHPLANNER_ENSURE_LOCAL_OSM_DB:-false}
-      LOCAL_OSM_POI_DB: ${LOCAL_OSM_POI_DB:-/app/runtime/local_osm_pois/italy.sqlite3}
-      LOCAL_OSM_PBF_PATH: ${LOCAL_OSM_PBF_PATH:-/app/pbf/italy-260626.osm.pbf}
+      LOCAL_OSM_POI_DB: ${LOCAL_OSM_POI_DB:-}
+      LOCAL_OSM_PBF_PATH: ${LOCAL_OSM_PBF_PATH:-}
       LOCAL_OSM_POI_BUILD_MODE: ${LOCAL_OSM_POI_BUILD_MODE:-full}
       LOCAL_OSM_POI_MIN_ROWS: ${LOCAL_OSM_POI_MIN_ROWS:-1}
       LOCAL_OSM_WALKABILITY_MIN_ROWS: ${LOCAL_OSM_WALKABILITY_MIN_ROWS:-1}

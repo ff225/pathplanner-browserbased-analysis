@@ -51,6 +51,9 @@ Se stai provando solo in HTTP temporaneo, imposta a `false` redirect/cookie secu
 
 ## Deploy con Docker Compose
 
+Per il deploy rapido dopo aver copiato gli zip runtime, usa anche la checklist
+breve in `docs/SERVER_RUNBOOK_AFTER_RUNTIME_UNZIP.md`.
+
 Sul server:
 
 ```bash

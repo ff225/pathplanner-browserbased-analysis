@@ -1048,12 +1048,21 @@ def _graphhopper_route_payload(
         ('instructions', 'true'),
     ]
     if alternatives and alternatives > 1:
+        # Distance-tolerance slider (1..10; 1 = baseline). The baseline stays at the
+        # legacy 1.15 / 0.75 pair so slider=1 is behaviourally unchanged. Higher
+        # tolerance both admits substantially longer alternatives (max_weight_factor)
+        # and lets them share more of the optimal corridor (max_share_factor), so a
+        # sparse single-corridor OD still yields several distinct options instead of
+        # collapsing to one route.
+        tol_steps = max(0.0, min(distance_tolerance, 10.0) - 1.0)  # 0 at baseline, up to 9
+        max_weight_factor = round(1.15 + tol_steps * 0.15, 3)      # 1.15 .. 2.5
+        max_share_factor = round(min(0.9, 0.75 + tol_steps * 0.02), 3)  # 0.75 .. 0.9
         params.extend([
             ('algorithm', 'alternative_route'),
             ('ch.disable', 'true'),
             ('alternative_route.max_paths', str(max(1, min(int(alternatives), 5)))),
-            ('alternative_route.max_weight_factor', str(1.15 + max(0.0, min(distance_tolerance, 10.0) - 1.0) * 0.08)),
-            ('alternative_route.max_share_factor', '0.75'),
+            ('alternative_route.max_weight_factor', str(max_weight_factor)),
+            ('alternative_route.max_share_factor', str(max_share_factor)),
         ])
     if GRAPHHOPPER_API_KEY:
         params.append(('key', GRAPHHOPPER_API_KEY))
